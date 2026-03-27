@@ -2,20 +2,21 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
+	"github.com/adamarutyunov/launch/embed"
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"squirrel/internal/git"
 	"squirrel/internal/linear"
+	"squirrel/internal/workspace"
 )
 
-const oldBranchThreshold = 7 * 24 * time.Hour
 const termPanelLines = 3 // divider + term-header + term-input
 
 var (
@@ -27,61 +28,54 @@ var (
 	colorAmber     = lipgloss.Color("#f59e0b")
 	colorRed       = lipgloss.Color("#ef4444")
 
-	styleTitle      = lipgloss.NewStyle().Bold(true).Foreground(colorWhite)
-	styleDim        = lipgloss.NewStyle().Foreground(colorDim)
-	styleCurrent    = lipgloss.NewStyle().Foreground(colorAmber).Bold(true)
-	styleLinearID   = lipgloss.NewStyle().Foreground(colorBlue).Bold(true)
-	styleLinearDim  = lipgloss.NewStyle().Foreground(colorDim)
-	styleRepoHeader = lipgloss.NewStyle().Foreground(colorDim).Bold(true)
-	styleToggle     = lipgloss.NewStyle().Foreground(colorDim) // older branches: grey
-	styleStatus     = lipgloss.NewStyle().Foreground(colorGreen)
-	styleRemote     = lipgloss.NewStyle().Foreground(colorBlue)
-	styleDanger     = lipgloss.NewStyle().Foreground(colorRed)
-	styleWarning    = lipgloss.NewStyle().Foreground(colorAmber)
+	styleTitle     = lipgloss.NewStyle().Bold(true).Foreground(colorWhite)
+	styleDim       = lipgloss.NewStyle().Foreground(colorDim)
+	styleMain      = lipgloss.NewStyle().Foreground(colorAmber).Bold(true)
+	styleLinearID  = lipgloss.NewStyle().Foreground(colorBlue).Bold(true)
+	styleLinearDim = lipgloss.NewStyle().Foreground(colorDim)
+	styleHeader    = lipgloss.NewStyle().Foreground(colorDim).Bold(true)
+	styleStatus    = lipgloss.NewStyle().Foreground(colorGreen)
+	styleDanger    = lipgloss.NewStyle().Foreground(colorRed)
+	styleWarning   = lipgloss.NewStyle().Foreground(colorAmber)
 )
 
-// RowType classifies each rendered line in the flat list.
-type RowType int
+type rowType int
 
 const (
-	rowTypeHeader  RowType = iota // repo name separator — not navigable
-	rowTypeBranch                 // a branch — navigable
-	rowTypeToggle                 // expand/collapse old branches — navigable
-	rowTypeSpacer                 // empty line between repos — not navigable
+	rowTypeHeader  rowType = iota
+	rowTypeContext
+	rowTypeSpacer
 )
 
 type row struct {
-	kind        RowType
-	repoIdx     int
-	itemIdx     int  // for rowTypeBranch: index into filteredItems[repoIdx]
-	toggleCount int  // for rowTypeToggle: number of hidden/shown branches
-	isExpanded  bool // for rowTypeToggle: current expansion state
+	kind    rowType
+	repoIdx int
+	itemIdx int
 }
 
-type branchItem struct {
-	branch   git.Branch
-	issue    *linear.Issue
-	repoPath string
-	repoName string
+type contextItem struct {
+	context workspace.Context
 }
 
-type confirmActionType int
+type uiMode int
 
 const (
-	confirmDeleteLocal confirmActionType = iota
-	confirmDeleteLocalAndRemote
+	modeBrowsing uiMode = iota
+	modeCreating
+	modeDeleteConfirm
 )
+
 
 // Model is the BubbleTea model.
 type Model struct {
+	version      string
 	repoPaths    []string
 	repoNames    []string
-	repoItems    [][]branchItem
-	repoExpanded []bool
+	repoConfigs  []workspace.Config
+	repoItems    [][]contextItem
 	linearIssues map[string]linear.Issue
 
-	// Rebuilt whenever filter or expansion state changes.
-	filteredItems [][]branchItem
+	filteredItems [][]contextItem
 	rows          []row
 
 	cursor       int
@@ -93,90 +87,107 @@ type Model struct {
 	width  int
 	height int
 
-	// Delete confirmation state.
-	confirmMode   bool
-	confirmAction confirmActionType
-	confirmItem   branchItem
+	mode          uiMode
+	createInput   textinput.Model
+	createRepoIdx int
 
-	// Right panel: output log.
+	// Linear issue picker (shown while in modeCreating when API key is set).
+	linearAPIKey   string
+	pickerIssues   []linear.Issue
+	pickerCursor   int // -1 = no selection; ≥0 = index into filteredPickerIssues()
+	pickerScroll   int // top visible index in filtered picker list
+	pickerLoading  bool
+
+	// Delete confirmation state.
+	deleteItem    contextItem
+	deleteRepoIdx int
+
+	// Active context — set by Enter; shown with amber * in the list.
+	selectedContextPath string
+
+	// Right panel: output log + terminal (shown when launch panel is inactive).
 	outputLines  []string
 	outputScroll int
+	termInput    textinput.Model
+	termFocused  bool
 
-	// Right panel: terminal input.
-	termInput   textinput.Model
-	termFocused bool
+	// Right panel: launch integration (when active, replaces terminal panel).
+	launchPanel   *embed.Model
+	launchFocused bool
 }
 
-var linearIDRegex = regexp.MustCompile(`(?i)[a-z][a-z0-9]+-\d+`)
-
-func NewModel(repoPaths []string, repoBranches [][]git.Branch, linearIssues map[string]linear.Issue) Model {
+func NewModel(
+	repoPaths []string,
+	repoContexts [][]workspace.Context,
+	repoConfigs []workspace.Config,
+	linearIssues map[string]linear.Issue,
+	linearAPIKey string,
+	version string,
+) Model {
 	repoNames := make([]string, len(repoPaths))
 	for i, path := range repoPaths {
 		repoNames[i] = filepath.Base(path)
 	}
 
-	repoItems := make([][]branchItem, len(repoPaths))
-	for repoIdx, branches := range repoBranches {
-		repoItems[repoIdx] = buildItems(branches, repoPaths[repoIdx], repoNames[repoIdx], linearIssues)
+	repoItems := make([][]contextItem, len(repoPaths))
+	for repoIdx, contexts := range repoContexts {
+		items := make([]contextItem, len(contexts))
+		for i, ctx := range contexts {
+			items[i] = contextItem{context: ctx}
+		}
+		repoItems[repoIdx] = items
 	}
 
 	filterInput := textinput.New()
-	filterInput.Placeholder = "Filter..."
+	filterInput.Placeholder = "type..."
 	filterInput.Focus()
 	filterInput.Prompt = ""
+
+	createInput := textinput.New()
+	createInput.Placeholder = "context name or filter issues..."
+	createInput.Prompt = ""
 
 	termInput := textinput.New()
 	termInput.Placeholder = "shell command..."
 	termInput.Prompt = "$ "
 
 	m := Model{
+		version:      version,
 		repoPaths:    repoPaths,
 		repoNames:    repoNames,
+		repoConfigs:  repoConfigs,
 		repoItems:    repoItems,
-		repoExpanded: make([]bool, len(repoPaths)),
 		linearIssues: linearIssues,
+		linearAPIKey: linearAPIKey,
+		pickerCursor: -1,
 		filter:       filterInput,
+		createInput:  createInput,
 		termInput:    termInput,
 	}
 	m.rebuild()
 	return m
 }
 
-func buildItems(branches []git.Branch, repoPath, repoName string, linearIssues map[string]linear.Issue) []branchItem {
-	items := make([]branchItem, len(branches))
-	for i, branch := range branches {
-		item := branchItem{branch: branch, repoPath: repoPath, repoName: repoName}
-		for _, match := range linearIDRegex.FindAllString(branch.Name, -1) {
-			if issue, ok := linearIssues[strings.ToUpper(match)]; ok {
-				issueCopy := issue
-				item.issue = &issueCopy
-				break
-			}
-		}
-		items[i] = item
-	}
-	return items
-}
-
-// rebuild rebuilds filteredItems and the flat row list from current state.
 func (m *Model) rebuild() {
 	query := strings.ToLower(m.filterValue)
 	filterActive := query != ""
 	multiRepo := len(m.repoPaths) > 1
 
-	m.filteredItems = make([][]branchItem, len(m.repoPaths))
+	m.filteredItems = make([][]contextItem, len(m.repoPaths))
 	for repoIdx, items := range m.repoItems {
 		if !filterActive {
 			m.filteredItems[repoIdx] = items
 			continue
 		}
-		var filtered []branchItem
+		var filtered []contextItem
 		for _, item := range items {
-			if strings.Contains(strings.ToLower(item.branch.Name), query) {
+			ctx := item.context
+			if strings.Contains(strings.ToLower(ctx.Name), query) ||
+				strings.Contains(strings.ToLower(ctx.Branch), query) {
 				filtered = append(filtered, item)
 				continue
 			}
-			if item.issue != nil && strings.Contains(strings.ToLower(item.issue.Title), query) {
+			if ctx.LinearIssue != nil && strings.Contains(strings.ToLower(ctx.LinearIssue.Title), query) {
 				filtered = append(filtered, item)
 			}
 		}
@@ -190,7 +201,6 @@ func (m *Model) rebuild() {
 		if len(items) == 0 {
 			continue
 		}
-
 		if multiRepo {
 			if !firstRepo {
 				m.rows = append(m.rows, row{kind: rowTypeSpacer, repoIdx: repoIdx})
@@ -198,39 +208,8 @@ func (m *Model) rebuild() {
 			m.rows = append(m.rows, row{kind: rowTypeHeader, repoIdx: repoIdx})
 			firstRepo = false
 		}
-
-		if filterActive {
-			for itemIdx := range items {
-				m.rows = append(m.rows, row{kind: rowTypeBranch, repoIdx: repoIdx, itemIdx: itemIdx})
-			}
-		} else {
-			var recentIdx, oldIdx []int
-			for itemIdx, item := range items {
-				if !item.branch.IsCurrent && time.Since(item.branch.LastCommitTime) > oldBranchThreshold {
-					oldIdx = append(oldIdx, itemIdx)
-				} else {
-					recentIdx = append(recentIdx, itemIdx)
-				}
-			}
-
-			for _, itemIdx := range recentIdx {
-				m.rows = append(m.rows, row{kind: rowTypeBranch, repoIdx: repoIdx, itemIdx: itemIdx})
-			}
-
-			if len(oldIdx) > 0 {
-				expanded := m.repoExpanded[repoIdx]
-				m.rows = append(m.rows, row{
-					kind:        rowTypeToggle,
-					repoIdx:     repoIdx,
-					toggleCount: len(oldIdx),
-					isExpanded:  expanded,
-				})
-				if expanded {
-					for _, itemIdx := range oldIdx {
-						m.rows = append(m.rows, row{kind: rowTypeBranch, repoIdx: repoIdx, itemIdx: itemIdx})
-					}
-				}
-			}
+		for itemIdx := range items {
+			m.rows = append(m.rows, row{kind: rowTypeContext, repoIdx: repoIdx, itemIdx: itemIdx})
 		}
 	}
 
@@ -256,9 +235,7 @@ func (m *Model) clampCursor() {
 	}
 }
 
-func isNavigable(kind RowType) bool {
-	return kind == rowTypeBranch || kind == rowTypeToggle
-}
+func isNavigable(kind rowType) bool { return kind == rowTypeContext }
 
 func (m *Model) moveCursor(dir int) {
 	next := m.cursor + dir
@@ -281,46 +258,83 @@ func (m *Model) ensureVisible() {
 	}
 }
 
+func (m Model) footerLineCount() int {
+	if m.mode == modeCreating {
+		if m.pickerLoading {
+			return 2 // input line + "Loading..." line
+		}
+		if n := len(m.filteredPickerIssues()); n > 0 {
+			return 1 + min(10, n) // input line + up to 10 issue lines
+		}
+	}
+	return 1
+}
+
 func (m Model) listHeight() int {
-	const fixedRows = 6 // header + blank + filter + blank + div + footer
-	h := m.height - fixedRows
+	// top-pad(1) + header(1) + blank(1) + filter(1) + blank(1) + divider(1) + footer(N)
+	fixed := 6 + m.footerLineCount()
+	h := m.height - fixed
 	if h < 1 {
 		return 1
 	}
 	return h
 }
 
-func (m Model) leftPanelWidth() int {
-	return m.width / 2
-}
+func (m Model) leftPanelWidth() int  { return m.width / 2 }
+func (m Model) rightPanelWidth() int { return m.width - m.leftPanelWidth() - 1 }
 
-func (m Model) rightPanelWidth() int {
-	return m.width - m.leftPanelWidth() - 1 // 1 for the │ separator
-}
+func (m Model) launchPanelHeight() int { return m.height / 2 }
 
-// outputAreaHeight is the number of scrollable output lines shown (right panel top).
-// Right panel: 1 (output header) + outputAreaHeight + termPanelLines = m.height
 func (m Model) outputAreaHeight() int {
-	h := m.height - 1 - termPanelLines
+	h := m.height
+	if m.launchPanel != nil {
+		h = h - m.launchPanelHeight() - 1 // top half + split divider
+	}
+	h = h - 1 - termPanelLines // output header + term section
 	if h < 1 {
 		return 1
 	}
 	return h
+}
+
+func (m Model) renderPrompt(ctx workspace.Context) string {
+	home, _ := os.UserHomeDir()
+	path := ctx.Path
+	if home != "" {
+		path = strings.Replace(path, home, "~", 1)
+	}
+	// Abbreviate intermediate path segments: ~/t/rcm-eng-9119
+	parts := strings.Split(path, "/")
+	for i := 1; i < len(parts)-1; i++ {
+		if len(parts[i]) > 1 {
+			parts[i] = string([]rune(parts[i])[:1])
+		}
+	}
+	shortPath := strings.Join(parts, "/")
+
+	line := styleStatus.Render(shortPath)
+	if ctx.Branch != "" {
+		line += styleDim.Render(" (") + styleDim.Render(ctx.Branch) + styleDim.Render(")")
+	}
+	line += styleStatus.Render(" >")
+	return line
 }
 
 func (m *Model) appendOutput(line string) {
 	m.outputLines = append(m.outputLines, line)
-	// Auto-scroll to bottom.
 	if excess := len(m.outputLines) - m.outputAreaHeight(); excess > 0 {
 		m.outputScroll = excess
 	}
 }
 
-func (m *Model) activeRepoPath() string {
+func (m *Model) activeContextPath() string {
+	if m.selectedContextPath != "" {
+		return m.selectedContextPath
+	}
 	if m.cursor < len(m.rows) {
 		r := m.rows[m.cursor]
-		if r.repoIdx < len(m.repoPaths) {
-			return m.repoPaths[r.repoIdx]
+		if r.kind == rowTypeContext && r.repoIdx < len(m.filteredItems) && r.itemIdx < len(m.filteredItems[r.repoIdx]) {
+			return m.filteredItems[r.repoIdx][r.itemIdx].context.Path
 		}
 	}
 	if len(m.repoPaths) > 0 {
@@ -329,26 +343,50 @@ func (m *Model) activeRepoPath() string {
 	return "."
 }
 
+func (m *Model) filteredPickerIssues() []linear.Issue {
+	if len(m.pickerIssues) == 0 {
+		return nil
+	}
+	query := strings.ToLower(strings.TrimSpace(m.createInput.Value()))
+	if query == "" {
+		return m.pickerIssues
+	}
+	var filtered []linear.Issue
+	for _, issue := range m.pickerIssues {
+		if strings.Contains(strings.ToLower(issue.Identifier), query) ||
+			strings.Contains(strings.ToLower(issue.Title), query) ||
+			strings.Contains(strings.ToLower(issue.BranchName), query) {
+			filtered = append(filtered, issue)
+		}
+	}
+	return filtered
+}
+
 // --- Tea messages ---
 
 type tickMsg time.Time
 
 type refreshMsg struct {
 	repoIdx  int
-	branches []git.Branch
+	contexts []workspace.Context
 }
 
-type checkoutResultMsg struct {
-	repoIdx int
-	branch  string
-	output  string
-	err     error
+type createContextResultMsg struct {
+	repoIdx      int
+	contextName  string
+	worktreePath string
+	err          error
 }
 
-type deleteResultMsg struct {
-	repoIdx int
-	output  string
-	err     error
+type setupCommandResultMsg struct {
+	output string
+	err    error
+}
+
+type deleteContextResultMsg struct {
+	repoIdx     int
+	err         error
+	newContexts []workspace.Context // fresh list fetched immediately after the operation
 }
 
 type termCmdResultMsg struct {
@@ -356,74 +394,88 @@ type termCmdResultMsg struct {
 	err    error
 }
 
-type unpushedCheckMsg struct {
-	commits []string
-	err     error
+type clipboardMsg struct {
+	path string
+	err  error
 }
+
+type linearIssuesLoadedMsg struct {
+	issues []linear.Issue
+	err    error
+}
+
+// --- Tea commands ---
 
 func tickCmd() tea.Cmd {
 	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
-func refreshRepoCmd(repoIdx int, repoPath string) tea.Cmd {
+func refreshRepoCmd(repoIdx int, repoPath string, linearIssues map[string]linear.Issue) tea.Cmd {
 	return func() tea.Msg {
-		branches, err := git.GetBranches(repoPath)
+		contexts, err := workspace.ListContexts(repoPath, linearIssues)
 		if err != nil {
 			return nil
 		}
-		return refreshMsg{repoIdx: repoIdx, branches: branches}
+		return refreshMsg{repoIdx: repoIdx, contexts: contexts}
 	}
 }
 
-func checkoutCmd(repoIdx int, repoPath, branch string) tea.Cmd {
+func createContextCmd(repoIdx int, repoPath, contextName string, cfg workspace.Config) tea.Cmd {
 	return func() tea.Msg {
-		cmd := exec.Command("git", "-C", repoPath, "checkout", branch)
-		outputBytes, err := cmd.CombinedOutput()
-		return checkoutResultMsg{
-			repoIdx: repoIdx,
-			branch:  branch,
-			output:  strings.TrimSpace(string(outputBytes)),
-			err:     err,
-		}
+		worktreePath, err := workspace.CreateContext(repoPath, contextName, contextName, cfg)
+		return createContextResultMsg{repoIdx: repoIdx, contextName: contextName, worktreePath: worktreePath, err: err}
 	}
 }
 
-func deleteLocalCmd(repoIdx int, repoPath, branchName string, force bool) tea.Cmd {
+func setupCommandCmd(worktreePath, command string) tea.Cmd {
 	return func() tea.Msg {
-		output, err := git.DeleteLocalBranch(repoPath, branchName, force)
-		return deleteResultMsg{repoIdx: repoIdx, output: output, err: err}
-	}
-}
-
-func deleteLocalAndRemoteCmd(repoIdx int, repoPath, branchName, remoteName string) tea.Cmd {
-	return func() tea.Msg {
-		localOut, localErr := git.DeleteLocalBranch(repoPath, branchName, true)
-		if localErr != nil {
-			return deleteResultMsg{repoIdx: repoIdx, output: localOut, err: localErr}
-		}
-		remoteOut, remoteErr := git.DeleteRemoteBranch(repoPath, remoteName)
-		combined := strings.TrimSpace(localOut + "\n" + remoteOut)
-		return deleteResultMsg{repoIdx: repoIdx, output: combined, err: remoteErr}
-	}
-}
-
-func runTermCmd(repoPath, input string) tea.Cmd {
-	return func() tea.Msg {
-		parts := strings.Fields(input)
+		parts := strings.Fields(command)
 		if len(parts) == 0 {
-			return termCmdResultMsg{}
+			return setupCommandResultMsg{}
 		}
 		cmd := exec.Command(parts[0], parts[1:]...)
-		cmd.Dir = repoPath
+		cmd.Dir = worktreePath
+		output, err := cmd.CombinedOutput()
+		return setupCommandResultMsg{output: strings.TrimSpace(string(output)), err: err}
+	}
+}
+
+func deleteContextCmd(repoIdx int, repoPath string, ctx workspace.Context, force bool, linearIssues map[string]linear.Issue) tea.Cmd {
+	return func() tea.Msg {
+		err := workspace.DeleteContext(ctx, force)
+		newContexts, _ := workspace.ListContexts(repoPath, linearIssues)
+		return deleteContextResultMsg{repoIdx: repoIdx, err: err, newContexts: newContexts}
+	}
+}
+
+func runTermCmd(contextPath, input string) tea.Cmd {
+	return func() tea.Msg {
+		if strings.TrimSpace(input) == "" {
+			return termCmdResultMsg{}
+		}
+		shell := os.Getenv("SHELL")
+		if shell == "" {
+			shell = "/bin/sh"
+		}
+		cmd := exec.Command(shell, "-c", input)
+		cmd.Dir = contextPath
 		outputBytes, err := cmd.CombinedOutput()
 		return termCmdResultMsg{output: strings.TrimSpace(string(outputBytes)), err: err}
 	}
 }
 
-func unpushedCheckCmd(repoPath, branchName, remoteName string) tea.Cmd {
+func copyToClipboardCmd(path string) tea.Cmd {
 	return func() tea.Msg {
-		commits, err := git.GetUnpushedCommits(repoPath, branchName, remoteName)
-		return unpushedCheckMsg{commits: commits, err: err}
+		err := clipboard.WriteAll(path)
+		return clipboardMsg{path: path, err: err}
+	}
+}
+
+func fetchLinearIssuesCmd(apiKey string) tea.Cmd {
+	return func() tea.Msg {
+		client := linear.NewClient(apiKey)
+		issues, err := client.FetchAssignedIssues()
+		return linearIssuesLoadedMsg{issues: issues, err: err}
 	}
 }
 
@@ -438,12 +490,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		if m.launchPanel != nil {
+			newPanel, cmd := m.launchPanel.Update(tea.WindowSizeMsg{
+				Width:  m.rightPanelWidth(),
+				Height: m.launchPanelHeight(),
+			})
+			*m.launchPanel = newPanel
+			return m, cmd
+		}
 		return m, nil
 
 	case tickMsg:
 		cmds := make([]tea.Cmd, len(m.repoPaths)+1)
 		for i, path := range m.repoPaths {
-			cmds[i] = refreshRepoCmd(i, path)
+			cmds[i] = refreshRepoCmd(i, path, m.linearIssues)
 		}
 		cmds[len(m.repoPaths)] = tickCmd()
 		return m, tea.Batch(cmds...)
@@ -452,39 +512,51 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyRefresh(msg)
 		return m, nil
 
-	case checkoutResultMsg:
-		if msg.err != nil {
-			m.appendOutput("✗ checkout failed")
-			if msg.output != "" {
-				for _, line := range strings.Split(msg.output, "\n") {
-					m.appendOutput("  " + line)
-				}
-			}
-		} else {
-			m.appendOutput("✓ switched to " + msg.branch)
-			if msg.output != "" {
-				for _, line := range strings.Split(msg.output, "\n") {
-					m.appendOutput("  " + line)
-				}
-			}
-			return m, refreshRepoCmd(msg.repoIdx, m.repoPaths[msg.repoIdx])
+	case embed.EventMsg:
+		if m.launchPanel != nil {
+			newPanel, cmd := m.launchPanel.Update(msg)
+			*m.launchPanel = newPanel
+			return m, cmd
 		}
 		return m, nil
 
-	case deleteResultMsg:
+	case createContextResultMsg:
 		if msg.err != nil {
-			m.appendOutput("✗ delete failed")
-		} else {
-			m.appendOutput("✓ deleted")
+			m.appendOutput(styleDanger.Render("✗ Create failed: " + msg.err.Error()))
+			return m, nil
 		}
+		m.appendOutput(styleStatus.Render("✓ Created '" + msg.contextName + "'"))
+		m.appendOutput(styleDim.Render("  " + msg.worktreePath))
+
+		cfg := m.repoConfigs[msg.repoIdx]
+		refreshCmd := refreshRepoCmd(msg.repoIdx, m.repoPaths[msg.repoIdx], m.linearIssues)
+		if cfg.SetupCommand != "" {
+			m.appendOutput(styleDim.Render("  Running: " + cfg.SetupCommand))
+			return m, tea.Batch(refreshCmd, setupCommandCmd(msg.worktreePath, cfg.SetupCommand))
+		}
+		return m, refreshCmd
+
+	case setupCommandResultMsg:
 		if msg.output != "" {
 			for _, line := range strings.Split(msg.output, "\n") {
-				if line != "" {
-					m.appendOutput("  " + line)
-				}
+				m.appendOutput("  " + line)
 			}
 		}
-		return m, refreshRepoCmd(msg.repoIdx, m.repoPaths[msg.repoIdx])
+		if msg.err != nil {
+			m.appendOutput(styleDanger.Render("✗ Setup failed: " + msg.err.Error()))
+		} else {
+			m.appendOutput(styleStatus.Render("✓ Setup complete"))
+		}
+		return m, nil
+
+	case deleteContextResultMsg:
+		if msg.err != nil {
+			m.appendOutput(styleDanger.Render("✗ Delete failed: " + msg.err.Error()))
+		} else {
+			m.appendOutput(styleStatus.Render("✓ Deleted"))
+		}
+		m.applyRefresh(refreshMsg{repoIdx: msg.repoIdx, contexts: msg.newContexts})
+		return m, nil
 
 	case termCmdResultMsg:
 		if msg.output != "" {
@@ -493,16 +565,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if msg.err != nil {
-			m.appendOutput(styleDanger.Render("exit: " + msg.err.Error()))
+			m.appendOutput(styleDanger.Render("Exit: " + msg.err.Error()))
 		}
 		return m, nil
 
-	case unpushedCheckMsg:
-		if msg.err == nil && len(msg.commits) > 0 {
-			m.appendOutput(styleWarning.Render(fmt.Sprintf("  ⚠ %d unpushed commit(s):", len(msg.commits))))
-			for _, c := range msg.commits {
-				m.appendOutput("    " + c)
-			}
+	case clipboardMsg:
+		if msg.err != nil {
+			m.appendOutput(styleDanger.Render("✗ Clipboard: " + msg.err.Error()))
+		} else {
+			m.appendOutput(styleStatus.Render("Copied: " + msg.path))
+		}
+		return m, nil
+
+	case linearIssuesLoadedMsg:
+		m.pickerLoading = false
+		if msg.err != nil {
+			m.appendOutput(styleDanger.Render("✗ Linear: " + msg.err.Error()))
+		} else {
+			m.pickerIssues = msg.issues
 		}
 		return m, nil
 
@@ -515,18 +595,57 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Type == tea.KeyCtrlC {
+		if m.launchFocused && m.launchPanel != nil {
+			// ctrl+c in launch pane = kill processes and close panel
+			m.launchPanel.StopAll()
+			m.launchPanel = nil
+			m.launchFocused = false
+			m.appendOutput(styleStatus.Render("✓ Processes stopped"))
+			return m, nil
+		}
 		return m, tea.Quit
 	}
+
 	if msg.Type == tea.KeyTab {
-		m.termFocused = !m.termFocused
-		if m.termFocused {
-			m.termInput.Focus()
-			m.filter.Blur()
+		if m.launchPanel != nil {
+			// Toggle focus between context list and launch panel.
+			m.launchFocused = !m.launchFocused
+			if !m.launchFocused {
+				m.termFocused = false
+			}
 		} else {
-			m.filter.Focus()
-			m.termInput.Blur()
+			// Toggle terminal focus (original behaviour).
+			m.termFocused = !m.termFocused
+			if m.termFocused {
+				m.termInput.Focus()
+				m.filter.Blur()
+				m.createInput.Blur()
+			} else {
+				if m.mode == modeCreating {
+					m.createInput.Focus()
+				} else {
+					m.filter.Focus()
+				}
+				m.termInput.Blur()
+			}
 		}
 		return m, nil
+	}
+
+	// Forward all keys to launch when it has focus (except q = detach).
+	if m.launchFocused && m.launchPanel != nil {
+		if msg.String() == "q" {
+			if err := m.launchPanel.SaveState(); err != nil {
+				m.appendOutput(styleWarning.Render("⚠ Save state: " + err.Error()))
+			}
+			m.launchPanel = nil
+			m.launchFocused = false
+			m.appendOutput(styleDim.Render("Detached — processes still running"))
+			return m, nil
+		}
+		newPanel, cmd := m.launchPanel.Update(msg)
+		*m.launchPanel = newPanel
+		return m, cmd
 	}
 
 	if m.termFocused {
@@ -537,20 +656,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) handleTermKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
-	case tea.KeyEsc:
-		m.termFocused = false
-		m.filter.Focus()
-		m.termInput.Blur()
-		return m, nil
 	case tea.KeyEnter:
 		input := strings.TrimSpace(m.termInput.Value())
 		if input == "" {
 			return m, nil
 		}
-		repoPath := m.activeRepoPath()
-		m.appendOutput(styleDim.Render("$ "+input) + " " + styleDim.Render("["+filepath.Base(repoPath)+"]"))
+		contextPath := m.activeContextPath()
+		m.appendOutput(styleDim.Render("$ "+input) + " " + styleDim.Render("["+filepath.Base(contextPath)+"]"))
 		m.termInput.SetValue("")
-		return m, runTermCmd(repoPath, input)
+		return m, runTermCmd(contextPath, input)
 	case tea.KeyUp:
 		if m.outputScroll > 0 {
 			m.outputScroll--
@@ -573,18 +687,20 @@ func (m Model) handleTermKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.mode == modeCreating {
+		return m.handleCreateKey(msg)
+	}
+
 	switch msg.Type {
 	case tea.KeyEsc:
-		if m.confirmMode {
-			m.confirmMode = false
+		if m.mode == modeDeleteConfirm {
+			m.mode = modeBrowsing
 			return m, nil
 		}
 		if m.filterValue != "" {
 			m.filter.SetValue("")
 			m.filterValue = ""
 			m.rebuild()
-		} else {
-			return m, tea.Quit
 		}
 		return m, nil
 
@@ -597,122 +713,263 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyEnter:
-		if m.cursor < len(m.rows) {
+		if m.cursor < len(m.rows) && m.rows[m.cursor].kind == rowTypeContext {
 			r := m.rows[m.cursor]
-			switch r.kind {
-			case rowTypeBranch:
-				item := m.filteredItems[r.repoIdx][r.itemIdx]
-				if !item.branch.IsCurrent {
-					return m, checkoutCmd(r.repoIdx, item.repoPath, item.branch.Name)
-				}
-			case rowTypeToggle:
-				m.repoExpanded[r.repoIdx] = !m.repoExpanded[r.repoIdx]
-				m.rebuild()
-			}
+			ctx := m.filteredItems[r.repoIdx][r.itemIdx].context
+			m.selectedContextPath = ctx.Path
+			m.appendOutput(m.renderPrompt(ctx))
 		}
 		return m, nil
+	}
 
-	default:
-		key := msg.String()
-
-		if key == "d" && m.filterValue == "" {
-			return m.handleDeleteKey(false)
+	key := msg.String()
+	switch key {
+	case "d":
+		if m.filterValue == "" {
+			return m.handleDeleteKey()
 		}
-		if key == "D" && m.filterValue == "" {
-			return m.handleDeleteKey(true)
+	case "n":
+		if m.filterValue == "" {
+			return m.startCreateContext()
 		}
-		if key == "q" && m.filterValue == "" {
+	case "c":
+		if m.filterValue == "" {
+			return m.copyContextPath()
+		}
+	case "l":
+		if m.filterValue == "" {
+			return m.toggleLaunch()
+		}
+	case "j":
+		m.moveCursor(1)
+		return m, nil
+	case "k":
+		m.moveCursor(-1)
+		return m, nil
+	case "q":
+		if m.filterValue == "" {
+			if m.launchPanel != nil {
+				if err := m.launchPanel.SaveState(); err != nil {
+					m.appendOutput(styleWarning.Render("⚠ Save state: " + err.Error()))
+				}
+				m.launchPanel = nil
+				m.launchFocused = false
+				m.appendOutput(styleDim.Render("Detached — processes still running"))
+				return m, nil
+			}
 			return m, tea.Quit
 		}
-
-		prevValue := m.filterValue
-		var cmd tea.Cmd
-		m.filter, cmd = m.filter.Update(msg)
-		m.filterValue = m.filter.Value()
-		if m.filterValue != prevValue {
-			m.confirmMode = false
-			m.rebuild()
-		}
-		return m, cmd
 	}
+
+	prevValue := m.filterValue
+	var cmd tea.Cmd
+	m.filter, cmd = m.filter.Update(msg)
+	m.filterValue = m.filter.Value()
+	if m.filterValue != prevValue {
+		m.mode = modeBrowsing
+		m.rebuild()
+	}
+	return m, cmd
 }
 
-func (m Model) handleDeleteKey(includeRemote bool) (tea.Model, tea.Cmd) {
-	if m.cursor >= len(m.rows) {
+func (m Model) handleCreateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.mode = modeBrowsing
+		m.createInput.SetValue("")
+		m.createInput.Blur()
+		m.filter.Focus()
+		m.pickerIssues = nil
+		m.pickerCursor = -1
+		m.pickerScroll = 0
+		m.pickerLoading = false
 		return m, nil
-	}
-	r := m.rows[m.cursor]
-	if r.kind != rowTypeBranch {
-		return m, nil
-	}
-	item := m.filteredItems[r.repoIdx][r.itemIdx]
 
-	if item.branch.IsCurrent {
-		m.appendOutput(styleDanger.Render("✗ cannot delete current branch"))
-		return m, nil
-	}
-
-	actionType := confirmDeleteLocal
-	if includeRemote {
-		actionType = confirmDeleteLocalAndRemote
-	}
-
-	// Second press on the same branch+action → execute.
-	if m.confirmMode &&
-		m.confirmAction == actionType &&
-		m.confirmItem.branch.Name == item.branch.Name &&
-		m.confirmItem.repoPath == item.repoPath {
-		m.confirmMode = false
-		if includeRemote {
-			if !item.branch.HasRemote() {
-				m.appendOutput(styleWarning.Render("  no remote tracking branch, deleting local only"))
-				return m, deleteLocalCmd(r.repoIdx, item.repoPath, item.branch.Name, true)
+	case tea.KeyUp:
+		if m.pickerCursor == 0 {
+			m.pickerCursor = -1
+		} else if m.pickerCursor > 0 {
+			m.pickerCursor--
+			if m.pickerCursor < m.pickerScroll {
+				m.pickerScroll = m.pickerCursor
 			}
-			return m, deleteLocalAndRemoteCmd(r.repoIdx, item.repoPath, item.branch.Name, item.branch.RemoteName)
 		}
-		return m, deleteLocalCmd(r.repoIdx, item.repoPath, item.branch.Name, false)
-	}
+		return m, nil
 
-	// First press → enter confirm mode and show info.
-	m.confirmMode = true
-	m.confirmAction = actionType
-	m.confirmItem = item
+	case tea.KeyDown:
+		filtered := m.filteredPickerIssues()
+		if m.pickerCursor < len(filtered)-1 {
+			m.pickerCursor++
+			if m.pickerCursor >= m.pickerScroll+10 {
+				m.pickerScroll = m.pickerCursor - 9
+			}
+		}
+		return m, nil
 
-	if includeRemote {
-		if item.branch.HasRemote() {
-			m.appendOutput(styleDanger.Render(fmt.Sprintf("delete '%s' + remote '%s'?", item.branch.Name, item.branch.RemoteName)))
+	case tea.KeyEnter:
+		var name string
+		filtered := m.filteredPickerIssues()
+		if m.pickerCursor >= 0 && m.pickerCursor < len(filtered) {
+			selectedIssue := filtered[m.pickerCursor]
+			// Pre-register the issue so refresh immediately links the new context.
+			m.linearIssues[selectedIssue.Identifier] = selectedIssue
+			branchName := selectedIssue.BranchName
+			if branchName == "" {
+				branchName = selectedIssue.Identifier
+			}
+			name = workspace.SanitizeName(branchName)
 		} else {
-			m.appendOutput(styleDanger.Render(fmt.Sprintf("delete '%s'?", item.branch.Name)) +
-				styleWarning.Render(" (no remote)"))
+			name = workspace.SanitizeName(m.createInput.Value())
 		}
-	} else {
-		m.appendOutput(styleDanger.Render(fmt.Sprintf("delete '%s'?", item.branch.Name)))
-		if !item.branch.HasRemote() {
-			m.appendOutput(styleWarning.Render("  ⚠ no remote tracking branch"))
+		if name == "" {
+			return m, nil
 		}
+		m.mode = modeBrowsing
+		m.createInput.SetValue("")
+		m.createInput.Blur()
+		m.filter.Focus()
+		m.pickerIssues = nil
+		m.pickerCursor = -1
+		m.pickerScroll = 0
+		m.pickerLoading = false
+
+		repoPath := m.repoPaths[m.createRepoIdx]
+		cfg := m.repoConfigs[m.createRepoIdx]
+		m.appendOutput(styleDim.Render("Creating context '" + name + "'..."))
+		return m, createContextCmd(m.createRepoIdx, repoPath, name, cfg)
 	}
 
-	// Fire unpushed check if has remote.
-	if item.branch.HasRemote() {
-		return m, unpushedCheckCmd(item.repoPath, item.branch.Name, item.branch.RemoteName)
+	prevValue := m.createInput.Value()
+	var cmd tea.Cmd
+	m.createInput, cmd = m.createInput.Update(msg)
+	if m.createInput.Value() != prevValue {
+		m.pickerCursor = -1
+		m.pickerScroll = 0
+	}
+	return m, cmd
+}
+
+func (m Model) startCreateContext() (tea.Model, tea.Cmd) {
+	repoIdx := 0
+	if m.cursor < len(m.rows) && m.rows[m.cursor].repoIdx < len(m.repoPaths) {
+		repoIdx = m.rows[m.cursor].repoIdx
+	}
+	m.createRepoIdx = repoIdx
+	m.mode = modeCreating
+	m.pickerCursor = -1
+	m.createInput.Focus()
+	m.filter.Blur()
+
+	if m.linearAPIKey != "" && len(m.pickerIssues) == 0 {
+		m.pickerLoading = true
+		return m, fetchLinearIssuesCmd(m.linearAPIKey)
 	}
 	return m, nil
 }
 
-func (m *Model) applyRefresh(msg refreshMsg) {
-	var cursorBranchName string
-	if m.cursor < len(m.rows) && m.rows[m.cursor].kind == rowTypeBranch {
-		r := m.rows[m.cursor]
-		cursorBranchName = m.filteredItems[r.repoIdx][r.itemIdx].branch.Name
+func (m Model) copyContextPath() (tea.Model, tea.Cmd) {
+	if m.cursor >= len(m.rows) || m.rows[m.cursor].kind != rowTypeContext {
+		return m, nil
+	}
+	r := m.rows[m.cursor]
+	item := m.filteredItems[r.repoIdx][r.itemIdx]
+	return m, copyToClipboardCmd(item.context.Path)
+}
+
+func (m Model) handleDeleteKey() (tea.Model, tea.Cmd) {
+	if m.cursor >= len(m.rows) || m.rows[m.cursor].kind != rowTypeContext {
+		return m, nil
+	}
+	r := m.rows[m.cursor]
+	item := m.filteredItems[r.repoIdx][r.itemIdx]
+
+	if item.context.IsMain {
+		m.appendOutput(styleDanger.Render("✗ Cannot delete main context"))
+		return m, nil
 	}
 
-	m.repoItems[msg.repoIdx] = buildItems(msg.branches, m.repoPaths[msg.repoIdx], m.repoNames[msg.repoIdx], m.linearIssues)
+	if !item.context.IsDirty {
+		m.appendOutput(styleDim.Render("Deleting '" + item.context.Name + "'..."))
+		return m, deleteContextCmd(r.repoIdx, m.repoPaths[r.repoIdx], item.context, true, m.linearIssues)
+	}
+
+	// Dirty — require double-press confirmation.
+	if m.mode == modeDeleteConfirm && m.deleteItem.context.Path == item.context.Path {
+		m.mode = modeBrowsing
+		m.appendOutput(styleDim.Render("Force deleting '" + item.context.Name + "'..."))
+		return m, deleteContextCmd(r.repoIdx, m.repoPaths[r.repoIdx], item.context, true, m.linearIssues)
+	}
+
+	m.mode = modeDeleteConfirm
+	m.deleteItem = item
+	m.deleteRepoIdx = r.repoIdx
+	m.appendOutput(styleDanger.Render(fmt.Sprintf(
+		"Delete '%s'? Press d again to confirm, Esc to cancel", item.context.Name)))
+	m.appendOutput(styleWarning.Render("  ⚠ Context has uncommitted changes"))
+	return m, nil
+}
+
+func (m Model) toggleLaunch() (tea.Model, tea.Cmd) {
+	// Close if already open.
+	if m.launchPanel != nil {
+		if err := m.launchPanel.SaveState(); err != nil {
+			m.appendOutput(styleWarning.Render("⚠ Save state: " + err.Error()))
+		}
+		m.launchPanel.StopAll()
+		m.launchPanel = nil
+		m.launchFocused = false
+		return m, nil
+	}
+
+	if m.cursor >= len(m.rows) || m.rows[m.cursor].kind != rowTypeContext {
+		return m, nil
+	}
+	r := m.rows[m.cursor]
+	contextPath := m.filteredItems[r.repoIdx][r.itemIdx].context.Path
+
+	panel, err := embed.New(contextPath)
+	if err != nil {
+		m.appendOutput(styleDanger.Render("✗ Launch: " + err.Error()))
+		return m, nil
+	}
+	if !panel.HasProcesses() {
+		m.appendOutput(styleWarning.Render("⚠ No launch.yml found in " + filepath.Base(contextPath)))
+		return m, nil
+	}
+
+	m.launchPanel = &panel
+	m.launchFocused = true
+
+	// Size the launch panel to the top half of the right panel.
+	sizedPanel, sizeCmd := m.launchPanel.Update(tea.WindowSizeMsg{
+		Width:  m.rightPanelWidth(),
+		Height: m.launchPanelHeight(),
+	})
+	*m.launchPanel = sizedPanel
+
+	initCmd := m.launchPanel.Init()
+	return m, tea.Batch(initCmd, sizeCmd)
+}
+
+
+func (m *Model) applyRefresh(msg refreshMsg) {
+	var cursorContextPath string
+	if m.cursor < len(m.rows) && m.rows[m.cursor].kind == rowTypeContext {
+		r := m.rows[m.cursor]
+		cursorContextPath = m.filteredItems[r.repoIdx][r.itemIdx].context.Path
+	}
+
+	items := make([]contextItem, len(msg.contexts))
+	for i, ctx := range msg.contexts {
+		items[i] = contextItem{context: ctx}
+	}
+	m.repoItems[msg.repoIdx] = items
 	m.rebuild()
 
-	if cursorBranchName != "" {
+	if cursorContextPath != "" {
 		for rowIdx, r := range m.rows {
-			if r.kind == rowTypeBranch {
-				if m.filteredItems[r.repoIdx][r.itemIdx].branch.Name == cursorBranchName {
+			if r.kind == rowTypeContext {
+				if m.filteredItems[r.repoIdx][r.itemIdx].context.Path == cursorContextPath {
 					m.cursor = rowIdx
 					m.ensureVisible()
 					return
@@ -735,7 +992,6 @@ func (m Model) View() string {
 	leftLines := strings.Split(m.renderLeft(leftW), "\n")
 	rightLines := strings.Split(m.renderRight(rightW), "\n")
 
-	// Ensure both panels have exactly m.height lines.
 	for len(leftLines) < m.height {
 		leftLines = append(leftLines, "")
 	}
@@ -764,18 +1020,22 @@ func padToWidth(line string, width int) string {
 func (m Model) renderLeft(w int) string {
 	divider := styleDim.Render(strings.Repeat("─", w))
 
-	title := styleTitle.Render(" Squirrel 0.9.9 ")
+	titleText := "Squirrel " + m.version
+	title := styleTitle.Render("  " + titleText)
 	var subtitle string
-	if len(m.repoPaths) > 1 {
-		subtitle = fmt.Sprintf("%d repos", len(m.repoPaths))
-	} else {
+	switch len(m.repoPaths) {
+	case 0:
+		subtitle = ""
+	case 1:
 		subtitle = m.repoNames[0]
+	default:
+		subtitle = fmt.Sprintf("%d projects", len(m.repoPaths))
 	}
 	subtitleStr := styleDim.Render(subtitle)
 	spacer := strings.Repeat(" ", max(1, w-lipgloss.Width(title)-lipgloss.Width(subtitleStr)))
 	header := title + spacer + subtitleStr
 
-	filterRow := styleDim.Render("  filter: ") + m.filter.View()
+	filterRow := styleDim.Render("  Filter: ") + m.filter.View()
 
 	listH := m.listHeight()
 	end := min(m.scrollOffset+listH, len(m.rows))
@@ -787,18 +1047,10 @@ func (m Model) renderLeft(w int) string {
 		rendered = append(rendered, "")
 	}
 
-	var footer string
-	if m.confirmMode {
-		if m.confirmAction == confirmDeleteLocal {
-			footer = " " + styleDanger.Render(fmt.Sprintf("delete '%s'? [d] confirm  [esc] cancel", m.confirmItem.branch.Name))
-		} else {
-			footer = " " + styleDanger.Render(fmt.Sprintf("delete local+remote '%s'? [D] confirm  [esc] cancel", m.confirmItem.branch.Name))
-		}
-	} else {
-		footer = styleDim.Render(" ↑↓ nav  enter checkout  d del  D del+remote  tab terminal  q quit")
-	}
+	footer := m.renderFooter(w)
 
 	return strings.Join([]string{
+		"",
 		header,
 		"",
 		filterRow,
@@ -809,14 +1061,81 @@ func (m Model) renderLeft(w int) string {
 	}, "\n")
 }
 
+func (m Model) renderFooter(w int) string {
+	switch m.mode {
+	case modeCreating:
+		inputLine := "  " + styleDim.Render("New Context: ") + m.createInput.View() +
+			styleDim.Render("  enter: Create  ↑↓: Pick  esc: Cancel")
+
+		if m.pickerLoading {
+			return inputLine + "\n" + styleDim.Render("  Loading issues...")
+		}
+
+		filtered := m.filteredPickerIssues()
+		total := len(filtered)
+		if total == 0 {
+			return inputLine
+		}
+
+		shown := min(10, total-m.pickerScroll)
+		lines := []string{inputLine}
+		for i := 0; i < shown; i++ {
+			idx := m.pickerScroll + i
+			issue := filtered[idx]
+			if idx == m.pickerCursor {
+				idStr := lipgloss.NewStyle().Background(colorSelection).Foreground(colorBlue).Bold(true).Render("  " + issue.Identifier)
+				titleStr := lipgloss.NewStyle().Background(colorSelection).Foreground(colorWhite).Width(w - 2 - lipgloss.Width("  "+issue.Identifier) - 2).Render("  " + issue.Title)
+				lines = append(lines, idStr+titleStr)
+			} else {
+				idStr := styleLinearID.Render("  " + issue.Identifier)
+				titleStr := styleDim.Render("  " + issue.Title)
+				lines = append(lines, idStr+titleStr)
+			}
+		}
+		return strings.Join(lines, "\n")
+
+	case modeDeleteConfirm:
+		return "  " + styleDanger.Render(fmt.Sprintf(
+			"Delete '%s'?  d: Confirm  esc: Cancel", m.deleteItem.context.Name))
+
+	default:
+		launchHint := ""
+		if m.launchPanel != nil {
+			if m.launchFocused {
+				launchHint = "  " + styleStatus.Render("● Launch") + styleDim.Render("  tab: Context  q: Detach  ctrl+c: Kill")
+				return launchHint
+			}
+			launchHint = "  l: Close Launch  "
+		}
+		return styleDim.Render("  ↑↓/jk: Nav  enter: Terminal  n: New  d: Del  c: Copy  l: Launch  tab: Term  q: Quit") + launchHint
+	}
+}
+
 func (m Model) renderRight(w int) string {
+	if m.launchPanel != nil {
+		launchH := m.launchPanelHeight()
+		launchLines := strings.Split(m.launchPanel.View(), "\n")
+		for len(launchLines) < launchH {
+			launchLines = append(launchLines, "")
+		}
+		launchLines = launchLines[:launchH]
+
+		splitDivider := styleDim.Render(strings.Repeat("─", w))
+		termH := m.height - launchH - 1
+		return strings.Join(launchLines, "\n") + "\n" + splitDivider + "\n" + m.renderTerminal(w, termH)
+	}
+	return m.renderTerminal(w, m.height)
+}
+
+func (m Model) renderTerminal(w, h int) string {
 	divider := styleDim.Render(strings.Repeat("─", w))
-	outH := m.outputAreaHeight()
+	outH := h - 1 - termPanelLines // 1 for output header line
+	if outH < 0 {
+		outH = 0
+	}
 
-	// Output header.
-	outputHeader := styleDim.Render(" output")
+	outputHeader := styleDim.Render(" Output")
 
-	// Output lines (scroll window).
 	outputRendered := make([]string, 0, outH)
 	for i := 0; i < outH; i++ {
 		lineIdx := m.outputScroll + i
@@ -827,14 +1146,13 @@ func (m Model) renderRight(w int) string {
 		}
 	}
 
-	// Terminal header with focus indicator.
 	var focusIndicator string
 	if m.termFocused {
 		focusIndicator = styleStatus.Render("● ")
 	} else {
 		focusIndicator = styleDim.Render("○ ")
 	}
-	termHeader := " " + focusIndicator + styleDim.Render("terminal  (tab focus, esc blur, ↑↓ scroll output)")
+	termHeader := " " + focusIndicator + styleDim.Render("Terminal  (tab: Toggle  ↑↓: Scroll)")
 	termLine := " " + m.termInput.View()
 
 	return strings.Join([]string{
@@ -849,177 +1167,164 @@ func (m Model) renderRight(w int) string {
 func (m Model) renderRow(r row, selected bool, w int) string {
 	switch r.kind {
 	case rowTypeHeader:
-		return m.renderHeader(r, w)
-	case rowTypeBranch:
-		return m.renderBranch(r, selected, w)
-	case rowTypeToggle:
-		return m.renderToggle(r, selected, w)
+		name := m.repoNames[r.repoIdx]
+		prefix := " ── " + name + " "
+		line := prefix + strings.Repeat("─", max(0, w-len(prefix)))
+		return styleHeader.Render(line)
+	case rowTypeContext:
+		return m.renderContext(r, selected, w)
 	case rowTypeSpacer:
 		return ""
 	}
 	return ""
 }
 
-func (m Model) renderHeader(r row, w int) string {
-	name := m.repoNames[r.repoIdx]
-	prefix := " ── " + name + " "
-	line := prefix + strings.Repeat("─", max(0, w-len(prefix)))
-	return styleRepoHeader.Render(line)
-}
-
-func (m Model) renderToggle(r row, selected bool, w int) string {
-	var label string
-	if r.isExpanded {
-		label = fmt.Sprintf("  ▾ hide %d older branches", r.toggleCount)
-	} else {
-		label = fmt.Sprintf("  ▸ %d older branches", r.toggleCount)
-	}
-	if selected {
-		return lipgloss.NewStyle().Background(colorSelection).Foreground(colorDim).Width(w).Render(label)
-	}
-	return styleToggle.Render(label)
-}
-
-func (m Model) renderBranch(r row, selected bool, w int) string {
+func (m Model) renderContext(r row, selected bool, w int) string {
 	item := m.filteredItems[r.repoIdx][r.itemIdx]
+	ctx := item.context
 
+	const prefixWidth = 2
+	const dirtyWidth = 2
 	const timeWidth = 8
-	const remoteWidth = 2  // "↑ " or "  "
-	const prefixWidth = 2  // "* " or "  "
-	const rightSectionWidth = remoteWidth + timeWidth // 10
+	rightWidth := dirtyWidth + timeWidth
 
-	// middleWidth is the space between prefix and the right section.
-	// remote+time are always anchored at w - rightSectionWidth, so ↑ is always aligned.
-	middleWidth := w - prefixWidth - rightSectionWidth
-	hasLinear := item.issue != nil
+	middleWidth := w - prefixWidth - rightWidth
+	if middleWidth < 10 {
+		middleWidth = 10
+	}
 
-	var branchColW, linearColW int
-	if hasLinear {
-		branchColW = 35
-		if branchColW > middleWidth*2/5 {
-			branchColW = middleWidth * 2 / 5
-		}
-		linearColW = middleWidth - branchColW - 2 // 2 for sep between branch and linear
-		if linearColW < 10 {
-			linearColW = 10
-			branchColW = middleWidth - 2 - linearColW
-		}
+	hasLinear := ctx.LinearIssue != nil
+	hasBranch := ctx.Branch != "" && ctx.Branch != ctx.Name
+
+	var nameColW, branchColW, linearColW int
+	if !hasBranch && !hasLinear {
+		nameColW = middleWidth
 	} else {
-		branchColW = middleWidth
+		nameColW = min(20, middleWidth*2/5)
+		if nameColW < 8 {
+			nameColW = 8
+		}
+		remaining := middleWidth - nameColW - 2
+		if remaining < 0 {
+			remaining = 0
+		}
+		if hasBranch && hasLinear {
+			branchColW = remaining / 2
+			linearColW = remaining - branchColW - 2
+			if linearColW < 0 {
+				linearColW = 0
+			}
+		} else if hasBranch {
+			branchColW = remaining
+		} else {
+			linearColW = remaining
+		}
 	}
 
-	prefix := "  "
-	if item.branch.IsCurrent {
-		prefix = "* "
+	nameRunes := []rune(ctx.Name)
+	if len(nameRunes) > nameColW {
+		nameRunes = append(nameRunes[:nameColW-1], '…')
 	}
-	branchRaw := prefix + item.branch.Name
-	branchRunes := []rune(branchRaw)
-	if len(branchRunes) > branchColW {
-		branchRunes = append(branchRunes[:branchColW-1], '…')
-	}
-	branchPadded := string(branchRunes) + strings.Repeat(" ", max(0, branchColW-len(branchRunes)))
+	namePadded := string(nameRunes) + strings.Repeat(" ", max(0, nameColW-len(nameRunes)))
 
-	timeStr := fmt.Sprintf("%-*s", timeWidth, relativeTime(item.branch.LastCommitTime))
-
-	var remoteStr string
-	if item.branch.HasRemote() {
-		remoteStr = "↑ "
-	} else {
-		remoteStr = "  "
+	branchPadded := ""
+	if hasBranch && branchColW > 0 {
+		branchRunes := []rune(ctx.Branch)
+		if len(branchRunes) > branchColW {
+			branchRunes = append(branchRunes[:branchColW-1], '…')
+		}
+		branchPadded = string(branchRunes) + strings.Repeat(" ", max(0, branchColW-len(branchRunes)))
 	}
 
-	if selected {
-		return m.renderBranchSelected(item, branchPadded, remoteStr, timeStr, hasLinear, linearColW, w)
+	timeStr := fmt.Sprintf("%-*s", timeWidth, relativeTime(ctx.HeadTime))
+	dirtyStr := "  "
+	if ctx.IsDirty {
+		dirtyStr = "● "
 	}
-	return m.renderBranchNormal(item, branchPadded, remoteStr, timeStr, hasLinear, linearColW)
+
+	isActive := m.selectedContextPath != "" && ctx.Path == m.selectedContextPath
+	return m.renderContextRow(ctx, namePadded, branchPadded, dirtyStr, timeStr, hasLinear, linearColW, w, selected, isActive)
 }
 
-func (m Model) renderBranchNormal(item branchItem, branchPadded, remoteStr, timeStr string, hasLinear bool, linearColW int) string {
-	var branchStyled string
-	if item.branch.IsCurrent {
-		branchStyled = styleCurrent.Render(branchPadded)
+// renderContextRow renders a context row with independent cursor and active-selection layers.
+// isCursor = dark background highlight (navigation position).
+// isActive = amber bold * (the context selected with Enter for the terminal).
+func (m Model) renderContextRow(ctx workspace.Context, namePadded, branchPadded, dirtyStr, timeStr string, hasLinear bool, linearColW, w int, isCursor, isActive bool) string {
+	base := lipgloss.NewStyle()
+	if isCursor {
+		base = base.Background(colorSelection)
+	}
+
+	var prefixStyled, nameStyled string
+	if isActive {
+		prefixStyled = base.Foreground(colorAmber).Bold(true).Render("* ")
+		nameStyled = base.Foreground(colorAmber).Bold(true).Render(namePadded)
+	} else if ctx.IsMain {
+		prefixStyled = base.Bold(true).Render("  ")
+		nameStyled = base.Bold(true).Render(namePadded)
 	} else {
-		branchStyled = branchPadded
+		prefixStyled = base.Render("  ")
+		if isCursor {
+			nameStyled = base.Foreground(colorWhite).Render(namePadded)
+		} else {
+			nameStyled = namePadded
+		}
 	}
 
-	var remoteStyled string
-	if item.branch.HasRemote() {
-		remoteStyled = styleRemote.Render(remoteStr)
+	var dirtyStyled string
+	if ctx.IsDirty {
+		dirtyStyled = base.Foreground(colorAmber).Render(dirtyStr)
 	} else {
-		remoteStyled = remoteStr
+		dirtyStyled = base.Foreground(colorDim).Render(dirtyStr)
 	}
+	timeStyled := base.Foreground(colorDim).Render(timeStr)
 
-	timeStyled := styleDim.Render(timeStr)
-
-	if !hasLinear {
-		// branch fills middleWidth, remote+time follow immediately — ↑ stays aligned
-		return "  " + branchStyled + remoteStyled + timeStyled
-	}
-
-	linearRaw := item.issue.Identifier + " " + item.issue.Title
-	linearRunes := []rune(linearRaw)
-	if len(linearRunes) > linearColW {
-		linearRunes = append(linearRunes[:linearColW-1], '…')
-	}
-	linearPadded := string(linearRunes) + strings.Repeat(" ", max(0, linearColW-len(linearRunes)))
-
-	spaceIdx := strings.Index(linearPadded, " ")
 	var linearStyled string
-	if spaceIdx > 0 {
-		linearStyled = styleLinearID.Render(linearPadded[:spaceIdx]) + styleLinearDim.Render(linearPadded[spaceIdx:])
-	} else {
-		linearStyled = styleLinearID.Render(linearPadded)
-	}
-
-	// branch + sep(2) + linear fills middleWidth, remote+time follow immediately
-	return "  " + branchStyled + "  " + linearStyled + remoteStyled + timeStyled
-}
-
-func (m Model) renderBranchSelected(item branchItem, branchPadded, remoteStr, timeStr string, hasLinear bool, linearColW int, w int) string {
-	bg := lipgloss.NewStyle().Background(colorSelection)
-
-	// Branch name: amber if current (git), white otherwise.
-	var branchStyled string
-	if item.branch.IsCurrent {
-		branchStyled = bg.Foreground(colorAmber).Bold(true).Render(branchPadded)
-	} else {
-		branchStyled = bg.Foreground(colorWhite).Render(branchPadded)
-	}
-
-	remoteStyled := bg.Foreground(colorBlue).Render(remoteStr)
-	timeStyled := bg.Foreground(colorDim).Render(timeStr)
-	sepStyled := bg.Render("  ")
-
-	var line string
 	if hasLinear {
-		linearRaw := item.issue.Identifier + " " + item.issue.Title
+		linearRaw := ctx.LinearIssue.Identifier + " " + ctx.LinearIssue.Title
 		linearRunes := []rune(linearRaw)
 		if len(linearRunes) > linearColW {
 			linearRunes = append(linearRunes[:linearColW-1], '…')
 		}
 		linearPadded := string(linearRunes) + strings.Repeat(" ", max(0, linearColW-len(linearRunes)))
-		spaceIdx := strings.Index(linearPadded, " ")
-		var linearStyled string
-		if spaceIdx > 0 {
-			linearStyled = bg.Foreground(colorBlue).Bold(true).Render(linearPadded[:spaceIdx]) +
-				bg.Foreground(colorDim).Render(linearPadded[spaceIdx:])
+		if spaceIdx := strings.Index(linearPadded, " "); spaceIdx > 0 {
+			linearStyled = base.Foreground(colorBlue).Bold(true).Render(linearPadded[:spaceIdx]) +
+				base.Foreground(colorWhite).Render(linearPadded[spaceIdx:])
 		} else {
-			linearStyled = bg.Foreground(colorBlue).Bold(true).Render(linearPadded)
+			linearStyled = base.Foreground(colorBlue).Bold(true).Render(linearPadded)
 		}
-		line = bg.Render("  ") + branchStyled + sepStyled + linearStyled + remoteStyled + timeStyled
-	} else {
-		line = bg.Render("  ") + branchStyled + remoteStyled + timeStyled
 	}
 
-	// Pad the remainder with the selection background color.
-	visibleWidth := lipgloss.Width(line)
-	if visibleWidth < w {
-		line += bg.Render(strings.Repeat(" ", w-visibleWidth))
+	var branchStyled string
+	if branchPadded != "" {
+		branchStyled = base.Foreground(colorDim).Render("  " + branchPadded)
+	}
+
+	var line string
+	switch {
+	case branchPadded != "" && hasLinear:
+		line = prefixStyled + nameStyled + branchStyled + base.Render("  ") + linearStyled + dirtyStyled + timeStyled
+	case branchPadded != "":
+		line = prefixStyled + nameStyled + branchStyled + dirtyStyled + timeStyled
+	case hasLinear:
+		line = prefixStyled + nameStyled + base.Render("  ") + linearStyled + dirtyStyled + timeStyled
+	default:
+		line = prefixStyled + nameStyled + dirtyStyled + timeStyled
+	}
+
+	if isCursor {
+		visibleWidth := lipgloss.Width(line)
+		if visibleWidth < w {
+			line += base.Render(strings.Repeat(" ", w-visibleWidth))
+		}
 	}
 	return line
 }
 
 func relativeTime(t time.Time) string {
+	if t.IsZero() {
+		return "—"
+	}
 	since := time.Since(t)
 	switch {
 	case since < time.Minute:

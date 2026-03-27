@@ -10,6 +10,7 @@ import (
 	"squirrel/internal/git"
 	"squirrel/internal/linear"
 	"squirrel/internal/ui"
+	"squirrel/internal/workspace"
 )
 
 func main() {
@@ -29,23 +30,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Collect branches from all repos.
-	repoBranches := make([][]git.Branch, len(repoPaths))
-	var allBranches []git.Branch
-	for i, path := range repoPaths {
-		branches, err := git.GetBranches(path)
+	// Collect branch names from all worktrees for Linear ID extraction.
+	var allBranchNames []string
+	for _, repoPath := range repoPaths {
+		worktrees, err := git.ListWorktrees(repoPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: %s: %v\n", filepath.Base(path), err)
+			fmt.Fprintf(os.Stderr, "warning: %s: %v\n", filepath.Base(repoPath), err)
 			continue
 		}
-		repoBranches[i] = branches
-		allBranches = append(allBranches, branches...)
+		for _, wt := range worktrees {
+			if wt.Branch != "" {
+				allBranchNames = append(allBranchNames, wt.Branch)
+			}
+		}
 	}
 
 	// Batch-fetch Linear issues for all branch identifiers.
 	linearIssues := map[string]linear.Issue{}
 	if apiKey := os.Getenv("LINEAR_API_KEY"); apiKey != "" {
-		identifiers := git.ExtractLinearIdentifiers(allBranches)
+		identifiers := git.ExtractLinearIdentifiersFromStrings(allBranchNames)
 		if len(identifiers) > 0 {
 			client := linear.NewClient(apiKey)
 			fetched, err := client.FetchIssues(identifiers)
@@ -57,7 +60,26 @@ func main() {
 		}
 	}
 
-	model := ui.NewModel(repoPaths, repoBranches, linearIssues)
+	// Load configs and list contexts for each repo.
+	repoContexts := make([][]workspace.Context, len(repoPaths))
+	repoConfigs := make([]workspace.Config, len(repoPaths))
+
+	for i, repoPath := range repoPaths {
+		cfg, err := workspace.LoadConfig(repoPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: %s: config: %v\n", filepath.Base(repoPath), err)
+		}
+		repoConfigs[i] = cfg
+
+		contexts, err := workspace.ListContexts(repoPath, linearIssues)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: %s: %v\n", filepath.Base(repoPath), err)
+			continue
+		}
+		repoContexts[i] = contexts
+	}
+
+	model := ui.NewModel(repoPaths, repoContexts, repoConfigs, linearIssues, os.Getenv("LINEAR_API_KEY"), Version)
 	program := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := program.Run(); err != nil {

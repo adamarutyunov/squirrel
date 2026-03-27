@@ -72,6 +72,22 @@ func GetBranches(repoPath string) ([]Branch, error) {
 
 var linearIDPattern = regexp.MustCompile(`(?i)[a-z][a-z0-9]+-\d+`)
 
+// ExtractLinearIdentifiersFromStrings finds all Linear issue IDs from a slice of strings.
+func ExtractLinearIdentifiersFromStrings(names []string) []string {
+	seen := map[string]bool{}
+	var identifiers []string
+	for _, name := range names {
+		for _, match := range linearIDPattern.FindAllString(name, -1) {
+			upper := strings.ToUpper(match)
+			if !seen[upper] {
+				seen[upper] = true
+				identifiers = append(identifiers, upper)
+			}
+		}
+	}
+	return identifiers
+}
+
 // ExtractLinearIdentifiers finds all Linear issue IDs from branch names.
 // Identifiers are normalized to uppercase (e.g. "eng-123" → "ENG-123").
 func ExtractLinearIdentifiers(branches []Branch) []string {

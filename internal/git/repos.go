@@ -11,7 +11,7 @@ import (
 // If dir itself contains a .git directory, returns [dir].
 // Otherwise scans immediate subdirectories for .git directories.
 func DiscoverRepos(dir string) ([]string, error) {
-	if isGitRoot(dir) {
+	if isMainWorktree(dir) {
 		return []string{dir}, nil
 	}
 
@@ -26,7 +26,7 @@ func DiscoverRepos(dir string) ([]string, error) {
 			continue
 		}
 		subdir := filepath.Join(dir, entry.Name())
-		if isGitRoot(subdir) {
+		if isMainWorktree(subdir) {
 			paths = append(paths, subdir)
 		}
 	}
@@ -35,7 +35,10 @@ func DiscoverRepos(dir string) ([]string, error) {
 	return paths, nil
 }
 
-func isGitRoot(dir string) bool {
-	_, err := os.Stat(filepath.Join(dir, ".git"))
-	return err == nil
+// isMainWorktree returns true only when dir is a primary git repository
+// (i.e., .git is a directory). Linked worktrees have a .git file, not a
+// directory, so they are excluded — they are discovered via git worktree list.
+func isMainWorktree(dir string) bool {
+	info, err := os.Stat(filepath.Join(dir, ".git"))
+	return err == nil && info.IsDir()
 }
