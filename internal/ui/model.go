@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"squirrel/internal/agent"
 	"squirrel/internal/linear"
 	"squirrel/internal/workspace"
 )
@@ -42,7 +45,7 @@ var (
 type rowType int
 
 const (
-	rowTypeHeader  rowType = iota
+	rowTypeHeader rowType = iota
 	rowTypeContext
 	rowTypeSpacer
 )
@@ -65,6 +68,14 @@ const (
 	modeDeleteConfirm
 )
 
+type sortMode int
+
+const (
+	sortModeAgent sortMode = iota
+	sortModeAlphabetical
+	sortModeLinear
+	sortModeUpdated
+)
 
 // Model is the BubbleTea model.
 type Model struct {
@@ -83,6 +94,7 @@ type Model struct {
 
 	filter      textinput.Model
 	filterValue string
+	sortMode    sortMode
 
 	width  int
 	height int
@@ -92,11 +104,11 @@ type Model struct {
 	createRepoIdx int
 
 	// Linear issue picker (shown while in modeCreating when API key is set).
-	linearAPIKey   string
-	pickerIssues   []linear.Issue
-	pickerCursor   int // -1 = no selection; ≥0 = index into filteredPickerIssues()
-	pickerScroll   int // top visible index in filtered picker list
-	pickerLoading  bool
+	linearAPIKey  string
+	pickerIssues  []linear.Issue
+	pickerCursor  int // -1 = no selection; ≥0 = index into filteredPickerIssues()
+	pickerScroll  int // top visible index in filtered picker list
+	pickerLoading bool
 
 	// Delete confirmation state.
 	deleteItem    contextItem
@@ -163,6 +175,7 @@ func NewModel(
 		filter:       filterInput,
 		createInput:  createInput,
 		termInput:    termInput,
+		sortMode:     sortModeAgent,
 	}
 	m.rebuild()
 	return m
@@ -175,23 +188,24 @@ func (m *Model) rebuild() {
 
 	m.filteredItems = make([][]contextItem, len(m.repoPaths))
 	for repoIdx, items := range m.repoItems {
+		var sourceItems []contextItem
 		if !filterActive {
-			m.filteredItems[repoIdx] = items
-			continue
-		}
-		var filtered []contextItem
-		for _, item := range items {
-			ctx := item.context
-			if strings.Contains(strings.ToLower(ctx.Name), query) ||
-				strings.Contains(strings.ToLower(ctx.Branch), query) {
-				filtered = append(filtered, item)
-				continue
+			sourceItems = append([]contextItem(nil), items...)
+		} else {
+			for _, item := range items {
+				ctx := item.context
+				if strings.Contains(strings.ToLower(ctx.Name), query) ||
+					strings.Contains(strings.ToLower(ctx.Branch), query) {
+					sourceItems = append(sourceItems, item)
+					continue
+				}
+				if ctx.LinearIssue != nil && strings.Contains(strings.ToLower(ctx.LinearIssue.Title), query) {
+					sourceItems = append(sourceItems, item)
+				}
 			}
-			if ctx.LinearIssue != nil && strings.Contains(strings.ToLower(ctx.LinearIssue.Title), query) {
-				filtered = append(filtered, item)
-			}
 		}
-		m.filteredItems[repoIdx] = filtered
+		m.sortItems(sourceItems)
+		m.filteredItems[repoIdx] = sourceItems
 	}
 
 	m.rows = nil
@@ -238,13 +252,35 @@ func (m *Model) clampCursor() {
 func isNavigable(kind rowType) bool { return kind == rowTypeContext }
 
 func (m *Model) moveCursor(dir int) {
-	next := m.cursor + dir
-	for next >= 0 && next < len(m.rows) && !isNavigable(m.rows[next].kind) {
-		next += dir
+	if len(m.rows) == 0 {
+		return
 	}
-	if next >= 0 && next < len(m.rows) {
-		m.cursor = next
+
+	var navigableRows []int
+	for rowIndex, currentRow := range m.rows {
+		if isNavigable(currentRow.kind) {
+			navigableRows = append(navigableRows, rowIndex)
+		}
 	}
+	if len(navigableRows) == 0 {
+		return
+	}
+
+	currentIndex := 0
+	for index, rowIndex := range navigableRows {
+		if rowIndex == m.cursor {
+			currentIndex = index
+			break
+		}
+	}
+
+	nextIndex := currentIndex + dir
+	if nextIndex < 0 {
+		nextIndex = len(navigableRows) - 1
+	} else if nextIndex >= len(navigableRows) {
+		nextIndex = 0
+	}
+	m.cursor = navigableRows[nextIndex]
 	m.ensureVisible()
 }
 
@@ -362,6 +398,110 @@ func (m *Model) filteredPickerIssues() []linear.Issue {
 	return filtered
 }
 
+func (m *Model) cycleSortMode() {
+	switch m.sortMode {
+	case sortModeAgent:
+		m.sortMode = sortModeAlphabetical
+	case sortModeAlphabetical:
+		m.sortMode = sortModeLinear
+	case sortModeLinear:
+		m.sortMode = sortModeUpdated
+	default:
+		m.sortMode = sortModeAgent
+	}
+	m.rebuild()
+}
+
+func (m Model) sortModeLabel() string {
+	switch m.sortMode {
+	case sortModeAlphabetical:
+		return "Alpha"
+	case sortModeLinear:
+		return "Linear"
+	case sortModeUpdated:
+		return "Updated"
+	default:
+		return "Agent"
+	}
+}
+
+func (m Model) sortItems(items []contextItem) {
+	sort.SliceStable(items, func(leftIndex, rightIndex int) bool {
+		leftContext := items[leftIndex].context
+		rightContext := items[rightIndex].context
+
+		switch m.sortMode {
+		case sortModeAlphabetical:
+			return strings.ToLower(leftContext.Name) < strings.ToLower(rightContext.Name)
+		case sortModeLinear:
+			return compareLinearContexts(leftContext, rightContext)
+		case sortModeUpdated:
+			return compareUpdatedContexts(leftContext, rightContext)
+		default:
+			return compareAgentContexts(leftContext, rightContext)
+		}
+	})
+}
+
+func compareAgentContexts(leftContext, rightContext workspace.Context) bool {
+	leftRank := agentStatusRank(leftContext.AgentStatus)
+	rightRank := agentStatusRank(rightContext.AgentStatus)
+	if leftRank != rightRank {
+		return leftRank < rightRank
+	}
+	return compareUpdatedContexts(leftContext, rightContext)
+}
+
+func compareUpdatedContexts(leftContext, rightContext workspace.Context) bool {
+	if !leftContext.HeadTime.Equal(rightContext.HeadTime) {
+		return leftContext.HeadTime.After(rightContext.HeadTime)
+	}
+	return strings.ToLower(leftContext.Name) < strings.ToLower(rightContext.Name)
+}
+
+func compareLinearContexts(leftContext, rightContext workspace.Context) bool {
+	leftTeam, leftNumber, leftHasIssue := linearSortKey(leftContext)
+	rightTeam, rightNumber, rightHasIssue := linearSortKey(rightContext)
+	if leftHasIssue != rightHasIssue {
+		return leftHasIssue
+	}
+	if leftTeam != rightTeam {
+		return leftTeam < rightTeam
+	}
+	if leftNumber != rightNumber {
+		return leftNumber < rightNumber
+	}
+	return strings.ToLower(leftContext.Name) < strings.ToLower(rightContext.Name)
+}
+
+func linearSortKey(context workspace.Context) (string, int, bool) {
+	if context.LinearIssue == nil {
+		return "", 0, false
+	}
+	parts := strings.SplitN(context.LinearIssue.Identifier, "-", 2)
+	if len(parts) != 2 {
+		return strings.ToLower(context.LinearIssue.Identifier), 0, true
+	}
+	number, err := strconv.Atoi(parts[1])
+	if err != nil {
+		number = 0
+	}
+	return strings.ToLower(parts[0]), number, true
+}
+
+func agentStatusRank(status string) int {
+	switch status {
+	case agent.StatusDone:
+		return 0
+	case agent.StatusThinking:
+		return 1
+	case agent.StatusIdle:
+		return 2
+	default:
+		return 3
+	}
+}
+
 // --- Tea messages ---
 
 type tickMsg time.Time
@@ -402,6 +542,10 @@ type clipboardMsg struct {
 type linearIssuesLoadedMsg struct {
 	issues []linear.Issue
 	err    error
+}
+
+type agentAttachFinishedMsg struct {
+	err error
 }
 
 // --- Tea commands ---
@@ -477,6 +621,12 @@ func fetchLinearIssuesCmd(apiKey string) tea.Cmd {
 		issues, err := client.FetchAssignedIssues()
 		return linearIssuesLoadedMsg{issues: issues, err: err}
 	}
+}
+
+func attachAgentCmd(contextPath, command string) tea.Cmd {
+	return tea.ExecProcess(agent.AttachCommand(contextPath, command), func(err error) tea.Msg {
+		return agentAttachFinishedMsg{err: err}
+	})
 }
 
 // --- BubbleTea interface ---
@@ -583,6 +733,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendOutput(styleDanger.Render("✗ Linear: " + msg.err.Error()))
 		} else {
 			m.pickerIssues = msg.issues
+		}
+		return m, nil
+
+	case agentAttachFinishedMsg:
+		if msg.err != nil {
+			m.appendOutput(styleDanger.Render("✗ Agent attach: " + msg.err.Error()))
 		}
 		return m, nil
 
@@ -740,6 +896,13 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.filterValue == "" {
 			return m.toggleLaunch()
 		}
+	case "a":
+		if m.filterValue == "" {
+			return m.toggleAgent()
+		}
+	case "s":
+		m.cycleSortMode()
+		return m, nil
 	case "j":
 		m.moveCursor(1)
 		return m, nil
@@ -786,9 +949,18 @@ func (m Model) handleCreateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyUp:
-		if m.pickerCursor == 0 {
-			m.pickerCursor = -1
-		} else if m.pickerCursor > 0 {
+		filtered := m.filteredPickerIssues()
+		if len(filtered) == 0 {
+			return m, nil
+		}
+		if m.pickerCursor <= 0 {
+			m.pickerCursor = len(filtered) - 1
+			if len(filtered) > 10 {
+				m.pickerScroll = len(filtered) - 10
+			} else {
+				m.pickerScroll = 0
+			}
+		} else {
 			m.pickerCursor--
 			if m.pickerCursor < m.pickerScroll {
 				m.pickerScroll = m.pickerCursor
@@ -798,11 +970,17 @@ func (m Model) handleCreateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyDown:
 		filtered := m.filteredPickerIssues()
+		if len(filtered) == 0 {
+			return m, nil
+		}
 		if m.pickerCursor < len(filtered)-1 {
 			m.pickerCursor++
 			if m.pickerCursor >= m.pickerScroll+10 {
 				m.pickerScroll = m.pickerCursor - 9
 			}
+		} else {
+			m.pickerCursor = 0
+			m.pickerScroll = 0
 		}
 		return m, nil
 
@@ -951,6 +1129,25 @@ func (m Model) toggleLaunch() (tea.Model, tea.Cmd) {
 	return m, tea.Batch(initCmd, sizeCmd)
 }
 
+func (m Model) toggleAgent() (tea.Model, tea.Cmd) {
+	if m.cursor >= len(m.rows) || m.rows[m.cursor].kind != rowTypeContext {
+		return m, nil
+	}
+
+	if m.launchPanel != nil {
+		if err := m.launchPanel.SaveState(); err != nil {
+			m.appendOutput(styleWarning.Render("⚠ Save state: " + err.Error()))
+		}
+		m.launchPanel = nil
+		m.launchFocused = false
+	}
+
+	r := m.rows[m.cursor]
+	contextPath := m.filteredItems[r.repoIdx][r.itemIdx].context.Path
+	command := agent.PreferredCommand()
+	m.appendOutput(styleDim.Render("Attaching agent in " + filepath.Base(contextPath) + ": " + command))
+	return m, attachAgentCmd(contextPath, command)
+}
 
 func (m *Model) applyRefresh(msg refreshMsg) {
 	var cursorContextPath string
@@ -1107,7 +1304,7 @@ func (m Model) renderFooter(w int) string {
 			}
 			launchHint = "  l: Close Launch  "
 		}
-		return styleDim.Render("  ↑↓/jk: Nav  enter: Terminal  n: New  d: Del  c: Copy  l: Launch  tab: Term  q: Quit") + launchHint
+		return styleDim.Render("  ↑↓/jk: Nav  enter: Terminal  n: New  d: Del  c: Copy  a: Attach Agent  l: Launch  s: Sort("+m.sortModeLabel()+")  tab: Focus  q: Quit") + launchHint
 	}
 }
 
@@ -1183,7 +1380,7 @@ func (m Model) renderContext(r row, selected bool, w int) string {
 	item := m.filteredItems[r.repoIdx][r.itemIdx]
 	ctx := item.context
 
-	const prefixWidth = 2
+	const prefixWidth = 4
 	const dirtyWidth = 2
 	const timeWidth = 8
 	rightWidth := dirtyWidth + timeWidth
@@ -1255,15 +1452,33 @@ func (m Model) renderContextRow(ctx workspace.Context, namePadded, branchPadded,
 		base = base.Background(colorSelection)
 	}
 
-	var prefixStyled, nameStyled string
+	activePrefix := "  "
 	if isActive {
-		prefixStyled = base.Foreground(colorAmber).Bold(true).Render("* ")
+		activePrefix = "* "
+	}
+
+	statusPrefix := "  "
+	statusStyle := base.Foreground(colorDim)
+	switch ctx.AgentStatus {
+	case agent.StatusThinking:
+		statusPrefix = "◐ "
+		statusStyle = base.Foreground(colorBlue)
+	case agent.StatusDone:
+		statusPrefix = "● "
+		statusStyle = base.Foreground(colorGreen)
+	case agent.StatusIdle:
+		statusPrefix = "○ "
+		statusStyle = base.Foreground(colorDim)
+	}
+
+	prefixStyled := base.Render(activePrefix) + statusStyle.Render(statusPrefix)
+
+	var nameStyled string
+	if isActive {
 		nameStyled = base.Foreground(colorAmber).Bold(true).Render(namePadded)
 	} else if ctx.IsMain {
-		prefixStyled = base.Bold(true).Render("  ")
 		nameStyled = base.Bold(true).Render(namePadded)
 	} else {
-		prefixStyled = base.Render("  ")
 		if isCursor {
 			nameStyled = base.Foreground(colorWhite).Render(namePadded)
 		} else {

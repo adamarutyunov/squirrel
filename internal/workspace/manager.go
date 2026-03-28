@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"squirrel/internal/agent"
 	"squirrel/internal/git"
 	"squirrel/internal/linear"
 )
@@ -25,6 +26,7 @@ type Context struct {
 	IsDirty     bool
 	HeadTime    time.Time
 	LinearIssue *linear.Issue
+	AgentStatus string
 }
 
 // ListContexts returns all contexts for the repository at repoPath.
@@ -48,6 +50,10 @@ func ListContexts(repoPath string, linearIssues map[string]linear.Issue) ([]Cont
 			IsMain:   wt.IsMain,
 			IsDirty:  wt.IsDirty,
 			HeadTime: wt.HeadTime,
+		}
+		status, err := agent.ReadStatus(wt.Path)
+		if err == nil {
+			ctx.AgentStatus = status.State
 		}
 		for _, match := range linearIDRegex.FindAllString(wt.Branch, -1) {
 			if issue, ok := linearIssues[strings.ToUpper(match)]; ok {
@@ -133,6 +139,12 @@ func DeleteContext(ctx Context, force bool) error {
 		if dirty {
 			return fmt.Errorf("context has uncommitted changes")
 		}
+	}
+	if err := agent.CleanupContext(ctx.Path); err != nil {
+		return err
+	}
+	if err := agent.RemoveStatus(ctx.Path); err != nil {
+		return err
 	}
 	return git.RemoveWorktree(ctx.RepoPath, ctx.Path, force)
 }
