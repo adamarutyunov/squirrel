@@ -146,5 +146,10 @@ func DeleteContext(ctx Context, force bool) error {
 	if err := agent.RemoveStatus(ctx.Path); err != nil {
 		return err
 	}
+	// Remove saved session ID so --resume doesn't try to resume a deleted context.
+	sessionIDPath, err := agent.SessionIDPath(ctx.Path)
+	if err == nil {
+		os.Remove(sessionIDPath)
+	}
 	return git.RemoveWorktree(ctx.RepoPath, ctx.Path, force)
 }

@@ -1,4 +1,4 @@
-# squirrel
+# squirrel (a.k.a. SlopDeck)
 
 The best context manager for running multiple AI agents.
 

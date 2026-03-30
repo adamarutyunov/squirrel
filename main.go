@@ -151,7 +151,7 @@ func createCompanionPane(dir string) string {
 	if shell == "" {
 		shell = "/bin/sh"
 	}
-	output, err := exec.Command("tmux", "split-window", "-h", "-d", "-c", dir, "-P", "-F", "#{pane_id}", shell).Output()
+	output, err := exec.Command("tmux", "split-window", "-h", "-d", "-l", "35%", "-c", dir, "-P", "-F", "#{pane_id}", shell).Output()
 	if err != nil {
 		return ""
 	}

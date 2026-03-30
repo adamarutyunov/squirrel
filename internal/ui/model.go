@@ -125,9 +125,10 @@ type Model struct {
 	// Companion tmux pane (real terminal on the right).
 	companionPaneID string
 
-	// Right panel: launch integration (when active, replaces terminal panel).
-	launchPanel   *embed.Model
-	launchFocused bool
+	// Right panel: launch panels, one per project (keyed by repoIdx).
+	launchPanels      map[int]*embed.Model
+	launchContextPath map[int]string // repoIdx → context path the panel was opened from
+	launchFocusIndex  int            // -1 = main window, 0+ = index into sorted active repo indices
 
 	// Spinner animation frame counter (incremented every tick).
 	spinnerFrame int
@@ -178,8 +179,11 @@ func NewModel(
 		linearIssues:    linearIssues,
 		linearAPIKey:    linearAPIKey,
 		agentCommand:    agentCommand,
-		companionPaneID: companionPaneID,
-		pickerCursor:    -1,
+		companionPaneID:  companionPaneID,
+		launchPanels:      make(map[int]*embed.Model),
+		launchContextPath: make(map[int]string),
+		launchFocusIndex: -1,
+		pickerCursor:     -1,
 		filter:          filterInput,
 		createInput:     createInput,
 		sortMode:        sortModeAgent,
@@ -332,7 +336,6 @@ func (m Model) listHeight() int {
 }
 
 
-func (m Model) launchPanelHeight() int { return m.height / 2 }
 
 
 func (m Model) renderPrompt(ctx workspace.Context) string {
@@ -623,13 +626,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		if m.launchPanel != nil {
-			newPanel, cmd := m.launchPanel.Update(tea.WindowSizeMsg{
-				Width:  m.width,
-				Height: m.launchPanelHeight(),
-			})
-			*m.launchPanel = newPanel
-			return m, cmd
+		if m.hasActiveLaunch() {
+			panelHeight := m.launchPanelHeight()
+			var cmds []tea.Cmd
+			for _, panel := range m.launchPanels {
+				newPanel, cmd := panel.Update(tea.WindowSizeMsg{
+					Width:  m.launchPanelWidth(),
+					Height: panelHeight,
+				})
+				*panel = newPanel
+				cmds = append(cmds, cmd)
+			}
+			return m, tea.Batch(cmds...)
 		}
 		return m, nil
 
@@ -649,9 +657,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case embed.EventMsg:
-		if m.launchPanel != nil {
-			newPanel, cmd := m.launchPanel.Update(msg)
-			*m.launchPanel = newPanel
+		if panel, ok := m.launchPanels[msg.Tag]; ok {
+			newPanel, cmd := panel.Update(msg)
+			*panel = newPanel
 			return m, cmd
 		}
 		return m, nil
@@ -737,39 +745,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Type == tea.KeyCtrlC {
-		if m.launchFocused && m.launchPanel != nil {
-			// ctrl+c in launch pane = kill processes and close panel
-			m.launchPanel.StopAll()
-			m.launchPanel = nil
-			m.launchFocused = false
-			m.appendOutput(styleStatus.Render("✓ Processes stopped"))
-			return m, nil
-		}
 		return m, tea.Quit
 	}
 
 	if msg.Type == tea.KeyTab {
-		if m.launchPanel != nil {
-			// Toggle focus between context list and launch panel.
-			m.launchFocused = !m.launchFocused
+		if m.hasActiveLaunch() {
+			sorted := m.sortedLaunchIndices()
+			m.launchFocusIndex++
+			if m.launchFocusIndex >= len(sorted) {
+				m.launchFocusIndex = -1
+			}
 		}
 		return m, nil
 	}
 
-	// Forward all keys to launch when it has focus (except q = detach).
-	if m.launchFocused && m.launchPanel != nil {
-		if msg.String() == "q" {
-			if err := m.launchPanel.SaveState(); err != nil {
-				m.appendOutput(styleWarning.Render("⚠ Save state: " + err.Error()))
+	// Forward keys to focused launch panel.
+	if m.isLaunchFocused() {
+		sorted := m.sortedLaunchIndices()
+		if m.launchFocusIndex < len(sorted) {
+			repoIdx := sorted[m.launchFocusIndex]
+			if panel, ok := m.launchPanels[repoIdx]; ok {
+				newPanel, cmd := panel.Update(msg)
+				*panel = newPanel
+				return m, cmd
 			}
-			m.launchPanel = nil
-			m.launchFocused = false
-			m.appendOutput(styleDim.Render("Detached — processes still running"))
-			return m, nil
 		}
-		newPanel, cmd := m.launchPanel.Update(msg)
-		*m.launchPanel = newPanel
-		return m, cmd
 	}
 
 	return m.handleListKey(msg)
@@ -835,7 +835,11 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "l":
 		if m.filterValue == "" {
-			return m.toggleLaunch()
+			return m.openLaunch()
+		}
+	case "L":
+		if m.filterValue == "" {
+			return m.closeLaunch()
 		}
 	case "a":
 		if m.filterValue == "" {
@@ -856,15 +860,6 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "q":
 		if m.filterValue == "" {
-			if m.launchPanel != nil {
-				if err := m.launchPanel.SaveState(); err != nil {
-					m.appendOutput(styleWarning.Render("⚠ Save state: " + err.Error()))
-				}
-				m.launchPanel = nil
-				m.launchFocused = false
-				m.appendOutput(styleDim.Render("Detached — processes still running"))
-				return m, nil
-			}
 			return m, tea.Quit
 		}
 	}
@@ -1004,6 +999,21 @@ func (m Model) copyContextPath() (tea.Model, tea.Cmd) {
 	return m, copyToClipboardCmd(item.context.Path)
 }
 
+func (m *Model) cleanupContext(repoIdx int, contextPath string) {
+	// Stop launch if running on this context.
+	if m.launchContextPath[repoIdx] == contextPath {
+		if panel, ok := m.launchPanels[repoIdx]; ok {
+			panel.StopAll()
+			delete(m.launchPanels, repoIdx)
+			delete(m.launchContextPath, repoIdx)
+			if !m.hasActiveLaunch() {
+				m.launchFocusIndex = -1
+			}
+		}
+	}
+	// Agent cleanup + session ID removal handled by workspace.DeleteContext.
+}
+
 func (m Model) handleDeleteKey() (tea.Model, tea.Cmd) {
 	if m.cursor >= len(m.rows) || m.rows[m.cursor].kind != rowTypeContext {
 		return m, nil
@@ -1017,6 +1027,7 @@ func (m Model) handleDeleteKey() (tea.Model, tea.Cmd) {
 	}
 
 	if !item.context.IsDirty {
+		m.cleanupContext(r.repoIdx, item.context.Path)
 		m.appendOutput(styleDim.Render("Deleting '" + item.context.Name + "'..."))
 		return m, deleteContextCmd(r.repoIdx, m.repoPaths[r.repoIdx], item.context, true, m.linearIssues)
 	}
@@ -1024,6 +1035,7 @@ func (m Model) handleDeleteKey() (tea.Model, tea.Cmd) {
 	// Dirty — require double-press confirmation.
 	if m.mode == modeDeleteConfirm && m.deleteItem.context.Path == item.context.Path {
 		m.mode = modeBrowsing
+		m.cleanupContext(r.repoIdx, item.context.Path)
 		m.appendOutput(styleDim.Render("Force deleting '" + item.context.Name + "'..."))
 		return m, deleteContextCmd(r.repoIdx, m.repoPaths[r.repoIdx], item.context, true, m.linearIssues)
 	}
@@ -1037,23 +1049,25 @@ func (m Model) handleDeleteKey() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) toggleLaunch() (tea.Model, tea.Cmd) {
-	// Close if already open.
-	if m.launchPanel != nil {
-		if err := m.launchPanel.SaveState(); err != nil {
-			m.appendOutput(styleWarning.Render("⚠ Save state: " + err.Error()))
-		}
-		m.launchPanel.StopAll()
-		m.launchPanel = nil
-		m.launchFocused = false
-		return m, nil
-	}
-
+func (m Model) openLaunch() (tea.Model, tea.Cmd) {
 	if m.cursor >= len(m.rows) || m.rows[m.cursor].kind != rowTypeContext {
 		return m, nil
 	}
 	r := m.rows[m.cursor]
-	contextPath := m.filteredItems[r.repoIdx][r.itemIdx].context.Path
+	repoIdx := r.repoIdx
+	contextPath := m.filteredItems[repoIdx][r.itemIdx].context.Path
+
+	// Already open on this exact context — do nothing.
+	if m.launchContextPath[repoIdx] == contextPath {
+		return m, nil
+	}
+
+	// Different context in same project — kill old one first.
+	if oldPanel, ok := m.launchPanels[repoIdx]; ok {
+		oldPanel.StopAll()
+		delete(m.launchPanels, repoIdx)
+		delete(m.launchContextPath, repoIdx)
+	}
 
 	panel, err := embed.New(contextPath)
 	if err != nil {
@@ -1065,18 +1079,44 @@ func (m Model) toggleLaunch() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	m.launchPanel = &panel
-	m.launchFocused = true
+	panel.Tag = repoIdx
+	m.launchPanels[repoIdx] = &panel
+	m.launchContextPath[repoIdx] = contextPath
 
-	// Size the launch panel to the top half of the right panel.
-	sizedPanel, sizeCmd := m.launchPanel.Update(tea.WindowSizeMsg{
-		Width:  m.width,
-		Height: m.launchPanelHeight(),
+	panelHeight := m.launchPanelHeight()
+	sizedPanel, sizeCmd := m.launchPanels[repoIdx].Update(tea.WindowSizeMsg{
+		Width:  m.launchPanelWidth(),
+		Height: panelHeight,
 	})
-	*m.launchPanel = sizedPanel
+	*m.launchPanels[repoIdx] = sizedPanel
 
-	initCmd := m.launchPanel.Init()
+	initCmd := m.launchPanels[repoIdx].Init()
+	m.launchPanels[repoIdx].ForceStartAutoStart()
+
 	return m, tea.Batch(initCmd, sizeCmd)
+}
+
+func (m Model) closeLaunch() (tea.Model, tea.Cmd) {
+	if m.cursor >= len(m.rows) || m.rows[m.cursor].kind != rowTypeContext {
+		return m, nil
+	}
+	r := m.rows[m.cursor]
+	repoIdx := r.repoIdx
+
+	panel, ok := m.launchPanels[repoIdx]
+	if !ok {
+		return m, nil
+	}
+	panel.StopAll()
+	delete(m.launchPanels, repoIdx)
+	delete(m.launchContextPath, repoIdx)
+	if !m.hasActiveLaunch() {
+		m.launchFocusIndex = -1
+	} else if m.launchFocusIndex >= len(m.launchPanels) {
+		m.launchFocusIndex = -1
+	}
+	m.appendOutput(styleStatus.Render("✓ Processes stopped"))
+	return m, nil
 }
 
 func (m Model) toggleAgent() (tea.Model, tea.Cmd) {
@@ -1159,12 +1199,91 @@ func (m *Model) applyRefresh(msg refreshMsg) {
 
 // --- Rendering ---
 
+func (m Model) launchPanelWidth() int {
+	w := m.width * 15 / 100
+	if w < 30 {
+		w = 30
+	}
+	return w
+}
+
+func (m Model) hasActiveLaunch() bool { return len(m.launchPanels) > 0 }
+
+func (m Model) launchPanelHeight() int {
+	n := len(m.launchPanels)
+	if n == 0 {
+		return 0
+	}
+	// Subtract dividers between panels.
+	return (m.height - (n - 1)) / n
+}
+
+func (m Model) isLaunchFocused() bool { return m.launchFocusIndex >= 0 }
+
+func (m Model) sortedLaunchIndices() []int {
+	indices := make([]int, 0, len(m.launchPanels))
+	for idx := range m.launchPanels {
+		indices = append(indices, idx)
+	}
+	sort.Ints(indices)
+	return indices
+}
+
+
 func (m Model) View() string {
 	if m.width == 0 {
 		return ""
 	}
 
-	return m.renderLeft(m.width)
+	if !m.hasActiveLaunch() {
+		return m.renderLeft(m.width)
+	}
+
+	launchW := m.launchPanelWidth()
+	leftW := m.width - launchW - 1
+
+	leftLines := strings.Split(m.renderLeft(leftW), "\n")
+
+	// Stack launch panels vertically with dividers between them.
+	sorted := m.sortedLaunchIndices()
+	panelH := m.launchPanelHeight()
+	rightW := launchW
+	var rightLines []string
+	for panelIndex, repoIdx := range sorted {
+		if panelIndex > 0 {
+			rightLines = append(rightLines, styleDim.Render(strings.Repeat("─", rightW)))
+		}
+		panel := m.launchPanels[repoIdx]
+		panelLines := strings.Split(panel.View(), "\n")
+		for len(panelLines) < panelH {
+			panelLines = append(panelLines, "")
+		}
+		rightLines = append(rightLines, panelLines[:panelH]...)
+	}
+
+	for len(leftLines) < m.height {
+		leftLines = append(leftLines, "")
+	}
+	for len(rightLines) < m.height {
+		rightLines = append(rightLines, "")
+	}
+
+	sep := styleDim.Render("│")
+	var result []string
+	for i := 0; i < m.height; i++ {
+		left := padToWidth(leftLines[i], leftW)
+		right := padToWidth(rightLines[i], rightW)
+		result = append(result, left+sep+right)
+	}
+	return strings.Join(result, "\n")
+}
+
+func padToWidth(line string, width int) string {
+	visible := lipgloss.Width(line)
+	if visible < width {
+		return line + strings.Repeat(" ", width-visible)
+	}
+	return line
 }
 
 func (m Model) renderLeft(w int) string {
@@ -1260,14 +1379,10 @@ func (m Model) renderFooter(w int) string {
 
 	default:
 		launchHint := ""
-		if m.launchPanel != nil {
-			if m.launchFocused {
-				launchHint = "  " + styleStatus.Render("● Launch") + styleDim.Render("  tab: Context  q: Detach  ctrl+c: Kill")
-				return launchHint
-			}
-			launchHint = "  l: Close Launch  "
+		if m.isLaunchFocused() {
+			launchHint = "  " + styleStatus.Render("● Launch") + styleDim.Render("  tab: Next")
 		}
-		return styleDim.Render("  ↑↓/jk: Nav  enter: Select  n: New  d: Del  c: Copy  a: Agent  l: Launch  s: Sort("+m.sortModeLabel()+")  ctrl+w: Terminal  q: Quit") + launchHint
+		return styleDim.Render("  ↑↓/jk: Nav  enter: Select  n: New  d: Del  c: Copy  a: Agent  l: Launch  L: Kill  s: Sort("+m.sortModeLabel()+")  tab: Cycle  ctrl+w: Terminal  q: Quit") + launchHint
 	}
 }
 
@@ -1293,8 +1408,9 @@ func (m Model) renderContext(r row, selected bool, w int) string {
 
 	const prefixWidth = 4
 	const dirtyWidth = 2
+	const launchWidth = 2
 	const timeWidth = 8
-	rightWidth := dirtyWidth + timeWidth
+	rightWidth := dirtyWidth + launchWidth + timeWidth
 
 	middleWidth := w - prefixWidth - rightWidth
 	if middleWidth < 10 {
@@ -1349,15 +1465,19 @@ func (m Model) renderContext(r row, selected bool, w int) string {
 	if ctx.IsDirty {
 		dirtyStr = "● "
 	}
+	launchStr := "  "
+	if m.launchContextPath[r.repoIdx] == ctx.Path {
+		launchStr = "▶ "
+	}
 
 	isActive := m.selectedContextPath != "" && ctx.Path == m.selectedContextPath
-	return m.renderContextRow(ctx, namePadded, branchPadded, dirtyStr, timeStr, hasLinear, linearColW, w, selected, isActive)
+	return m.renderContextRow(ctx, namePadded, branchPadded, dirtyStr, launchStr, timeStr, hasLinear, linearColW, w, selected, isActive)
 }
 
 // renderContextRow renders a context row with independent cursor and active-selection layers.
 // isCursor = dark background highlight (navigation position).
 // isActive = amber bold * (the context selected with Enter for the terminal).
-func (m Model) renderContextRow(ctx workspace.Context, namePadded, branchPadded, dirtyStr, timeStr string, hasLinear bool, linearColW, w int, isCursor, isActive bool) string {
+func (m Model) renderContextRow(ctx workspace.Context, namePadded, branchPadded, dirtyStr, launchStr, timeStr string, hasLinear bool, linearColW, w int, isCursor, isActive bool) string {
 	base := lipgloss.NewStyle()
 	if isCursor {
 		base = base.Background(colorSelection)
@@ -1404,6 +1524,12 @@ func (m Model) renderContextRow(ctx workspace.Context, namePadded, branchPadded,
 	} else {
 		dirtyStyled = base.Foreground(colorDim).Render(dirtyStr)
 	}
+	var launchStyled string
+	if launchStr == "▶ " {
+		launchStyled = base.Foreground(colorGreen).Render(launchStr)
+	} else {
+		launchStyled = base.Foreground(colorDim).Render(launchStr)
+	}
 	timeStyled := base.Foreground(colorDim).Render(timeStr)
 
 	var linearStyled string
@@ -1430,13 +1556,13 @@ func (m Model) renderContextRow(ctx workspace.Context, namePadded, branchPadded,
 	var line string
 	switch {
 	case branchPadded != "" && hasLinear:
-		line = prefixStyled + nameStyled + branchStyled + base.Render("  ") + linearStyled + dirtyStyled + timeStyled
+		line = prefixStyled + nameStyled + branchStyled + base.Render("  ") + linearStyled + dirtyStyled + launchStyled + timeStyled
 	case branchPadded != "":
-		line = prefixStyled + nameStyled + branchStyled + dirtyStyled + timeStyled
+		line = prefixStyled + nameStyled + branchStyled + dirtyStyled + launchStyled + timeStyled
 	case hasLinear:
-		line = prefixStyled + nameStyled + base.Render("  ") + linearStyled + dirtyStyled + timeStyled
+		line = prefixStyled + nameStyled + base.Render("  ") + linearStyled + dirtyStyled + launchStyled + timeStyled
 	default:
-		line = prefixStyled + nameStyled + dirtyStyled + timeStyled
+		line = prefixStyled + nameStyled + dirtyStyled + launchStyled + timeStyled
 	}
 
 	if isCursor {
