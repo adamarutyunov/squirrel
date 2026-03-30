@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type HookInput struct {
@@ -56,20 +57,34 @@ func HandleHookCommand() error {
 	return HandleHook(os.Stdin)
 }
 
-func InstallHooks() error {
+func InstallHooks() ([]string, error) {
 	exePath, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("could not determine executable path: %w", err)
+		return nil, fmt.Errorf("could not determine executable path: %w", err)
 	}
 
 	homeDirectory, err := os.UserHomeDir()
 	if err != nil {
-		return fmt.Errorf("could not determine home directory: %w", err)
+		return nil, fmt.Errorf("could not determine home directory: %w", err)
 	}
 
+	var installed []string
+	if err := installClaudeHooks(exePath, homeDirectory); err != nil {
+		return nil, fmt.Errorf("claude: %w", err)
+	}
+	installed = append(installed, "Claude (~/.claude/settings.json)")
+
+	if err := installCodexHooks(exePath, homeDirectory); err != nil {
+		return nil, fmt.Errorf("codex: %w", err)
+	}
+	installed = append(installed, "Codex (~/.codex/hooks.json)")
+
+	return installed, nil
+}
+
+func installClaudeHooks(exePath, homeDirectory string) error {
 	settingsPath := filepath.Join(homeDirectory, ".claude", "settings.json")
 
-	// Read existing settings or start fresh.
 	var settings map[string]any
 	data, err := os.ReadFile(settingsPath)
 	if err == nil {
@@ -87,10 +102,7 @@ func InstallHooks() error {
 	hookEntry := []any{
 		map[string]any{
 			"hooks": []any{
-				map[string]any{
-					"type":    "command",
-					"command": hookCommand,
-				},
+				map[string]any{"type": "command", "command": hookCommand},
 			},
 		},
 	}
@@ -99,15 +111,12 @@ func InstallHooks() error {
 		map[string]any{
 			"matcher": "idle_prompt",
 			"hooks": []any{
-				map[string]any{
-					"type":    "command",
-					"command": hookCommand,
-				},
+				map[string]any{"type": "command", "command": hookCommand},
 			},
 		},
 	}
 
-	hooks := map[string]any{
+	settings["hooks"] = map[string]any{
 		"SessionStart":     hookEntry,
 		"UserPromptSubmit": hookEntry,
 		"Stop":             hookEntry,
@@ -116,16 +125,74 @@ func InstallHooks() error {
 		"SessionEnd":       hookEntry,
 	}
 
-	settings["hooks"] = hooks
-
 	output, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
-		return fmt.Errorf("could not marshal settings: %w", err)
+		return err
 	}
-
 	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
 		return err
 	}
-
 	return os.WriteFile(settingsPath, output, 0o644)
+}
+
+func installCodexHooks(exePath, homeDirectory string) error {
+	// Enable hooks feature flag in config.toml.
+	configPath := filepath.Join(homeDirectory, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		return err
+	}
+	configData, err := os.ReadFile(configPath)
+	configContent := string(configData)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("could not read %s: %w", configPath, err)
+	}
+	if !strings.Contains(configContent, "codex_hooks") {
+		if !strings.Contains(configContent, "[features]") {
+			configContent += "\n[features]\ncodex_hooks = true\n"
+		} else {
+			configContent = strings.Replace(configContent, "[features]", "[features]\ncodex_hooks = true", 1)
+		}
+		if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
+			return fmt.Errorf("could not write %s: %w", configPath, err)
+		}
+	}
+
+	hooksPath := filepath.Join(homeDirectory, ".codex", "hooks.json")
+
+	var settings map[string]any
+	data, err := os.ReadFile(hooksPath)
+	if err == nil {
+		if err := json.Unmarshal(data, &settings); err != nil {
+			return fmt.Errorf("could not parse %s: %w", hooksPath, err)
+		}
+	} else if os.IsNotExist(err) {
+		settings = map[string]any{}
+	} else {
+		return fmt.Errorf("could not read %s: %w", hooksPath, err)
+	}
+
+	hookCommand := HookCommand(exePath)
+
+	hookEntry := []any{
+		map[string]any{
+			"hooks": []any{
+				map[string]any{"type": "command", "command": hookCommand},
+			},
+		},
+	}
+
+	settings["hooks"] = map[string]any{
+		"SessionStart":     hookEntry,
+		"UserPromptSubmit": hookEntry,
+		"Stop":             hookEntry,
+	}
+
+	output, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(hooksPath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(hooksPath, output, 0o644)
 }

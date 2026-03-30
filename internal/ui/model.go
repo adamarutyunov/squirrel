@@ -1142,6 +1142,11 @@ func (m Model) toggleAgent() (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// Reset done → idle when the user opens the agent.
+	if status, _ := agent.ReadStatus(contextPath); status.State == agent.StatusDone {
+		agent.WriteStatus(contextPath, agent.StatusIdle)
+	}
+
 	// Respawn the companion pane with the agent command in the context directory.
 	escapedPath := strings.ReplaceAll(contextPath, "'", "'\\''")
 	exec.Command("tmux", "respawn-pane", "-k", "-t", m.companionPaneID,
@@ -1162,6 +1167,11 @@ func (m Model) attachAgentFullscreen() (tea.Model, tea.Cmd) {
 	r := m.rows[m.cursor]
 	contextPath := m.filteredItems[r.repoIdx][r.itemIdx].context.Path
 	command := agent.PreferredCommand(m.agentCommand)
+
+	if status, _ := agent.ReadStatus(contextPath); status.State == agent.StatusDone {
+		agent.WriteStatus(contextPath, agent.StatusIdle)
+	}
+
 	m.appendOutput(styleDim.Render("Attaching agent (fullscreen): " + filepath.Base(contextPath) + "  (ctrl+q to detach)"))
 	return m, tea.ExecProcess(agent.AttachCommand(contextPath, command), func(err error) tea.Msg {
 		return agentAttachFinishedMsg{err: err}
@@ -1242,7 +1252,8 @@ func (m Model) View() string {
 	launchW := m.launchPanelWidth()
 	leftW := m.width - launchW - 1
 
-	leftLines := strings.Split(m.renderLeft(leftW), "\n")
+	leftContent := lipgloss.NewStyle().Width(leftW).MaxWidth(leftW).Render(m.renderLeft(leftW))
+	leftLines := strings.Split(leftContent, "\n")
 
 	// Stack launch panels vertically with dividers between them.
 	sorted := m.sortedLaunchIndices()
@@ -1318,26 +1329,50 @@ func (m Model) renderLeft(w int) string {
 
 	footer := m.renderFooter(w)
 
-	// Show last few status messages above the divider.
+	// Show last few status messages above the divider, truncated to panel width.
 	statusCount := m.statusLineCount()
 	var statusLines []string
 	for i := len(m.outputLines) - statusCount; i < len(m.outputLines); i++ {
-		statusLines = append(statusLines, "  "+m.outputLines[i])
+		line := "  " + m.outputLines[i]
+		statusLines = append(statusLines, lipgloss.NewStyle().MaxWidth(w).Render(line))
 	}
 
-	parts := []string{
-		"",
-		header,
-		"",
-		filterRow,
-		"",
-		strings.Join(rendered, "\n"),
+	// Build output with exactly m.height lines.
+	// Footer is pinned to the bottom — status and list absorb overflow.
+	lines := make([]string, 0, m.height)
+	lines = append(lines, "")       // top pad
+	lines = append(lines, header)   // header
+	lines = append(lines, "")       // blank
+	lines = append(lines, filterRow) // filter
+	lines = append(lines, "")       // blank
+	lines = append(lines, rendered...) // context list
+
+	// Calculate remaining space for status + divider + footer.
+	footerLines := strings.Split(footer, "\n")
+	bottomNeeded := 1 + len(footerLines) // divider + footer lines
+	remaining := m.height - len(lines) - bottomNeeded
+	if remaining > 0 && len(statusLines) > 0 {
+		shown := min(remaining, len(statusLines))
+		lines = append(lines, statusLines[len(statusLines)-shown:]...)
 	}
-	if len(statusLines) > 0 {
-		parts = append(parts, strings.Join(statusLines, "\n"))
+
+	// Pad to fill space before footer.
+	for len(lines) < m.height-bottomNeeded {
+		lines = append(lines, "")
 	}
-	parts = append(parts, divider, footer)
-	return strings.Join(parts, "\n")
+
+	lines = append(lines, divider)
+	lines = append(lines, footerLines...)
+
+	// Ensure exactly m.height lines.
+	if len(lines) > m.height {
+		lines = lines[:m.height]
+	}
+	for len(lines) < m.height {
+		lines = append(lines, "")
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) renderFooter(w int) string {

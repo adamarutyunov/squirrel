@@ -36,12 +36,15 @@ func AttachCommand(contextPath, command string) *exec.Cmd {
 	}
 
 	// No existing session — start a new one.
-	// For claude-based commands, resume the last session if we have a saved session ID.
+	// Resume the last session if we have a saved session ID.
 	agentCommand := command
 	commandBase := strings.Fields(command)[0]
-	if commandBase == "claude" {
-		if sessionID, _ := ReadSessionID(contextPath); sessionID != "" {
+	if sessionID, _ := ReadSessionID(contextPath); sessionID != "" {
+		switch commandBase {
+		case "claude":
 			agentCommand = command + " --resume " + sessionID
+		case "codex":
+			agentCommand = command + " resume " + sessionID
 		}
 	}
 

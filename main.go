@@ -26,11 +26,14 @@ func main() {
 	}
 
 	if len(os.Args) > 1 && os.Args[1] == "--install-hooks" {
-		if err := agent.InstallHooks(); err != nil {
+		installed, err := agent.InstallHooks()
+		if err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
-		fmt.Println("Claude hooks installed successfully.")
+		for _, name := range installed {
+			fmt.Println("✓ " + name)
+		}
 		return
 	}
 
@@ -135,7 +138,7 @@ func launchInTmux() {
 		os.Exit(1)
 	}
 	cmd := exec.Command("sh", "-c", fmt.Sprintf(
-		`tmux new-session '%s' \; set mouse on`,
+		`tmux new-session '%s' \; set mouse on \; set status off \; set pane-border-style 'fg=#71717a' \; set pane-active-border-style 'fg=#71717a'`,
 		exePath,
 	))
 	cmd.Stdin = os.Stdin
