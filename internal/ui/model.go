@@ -20,7 +20,6 @@ import (
 	"squirrel/internal/workspace"
 )
 
-const termPanelLines = 3 // divider + term-header + term-input
 
 var (
 	colorGreen     = lipgloss.Color("#22c55e")
@@ -120,11 +119,11 @@ type Model struct {
 	// Pending cursor target — after refresh, move cursor to this path.
 	pendingCursorPath string
 
-	// Right panel: output log + terminal (shown when launch panel is inactive).
-	outputLines  []string
-	outputScroll int
-	termInput    textinput.Model
-	termFocused  bool
+	// Status messages shown above the footer.
+	outputLines []string
+
+	// Companion tmux pane (real terminal on the right).
+	companionPaneID string
 
 	// Right panel: launch integration (when active, replaces terminal panel).
 	launchPanel   *embed.Model
@@ -144,6 +143,7 @@ func NewModel(
 	linearIssues map[string]linear.Issue,
 	linearAPIKey string,
 	agentCommand string,
+	companionPaneID string,
 	version string,
 ) Model {
 	repoNames := make([]string, len(repoPaths))
@@ -169,24 +169,20 @@ func NewModel(
 	createInput.Placeholder = "context name or filter issues..."
 	createInput.Prompt = ""
 
-	termInput := textinput.New()
-	termInput.Placeholder = "shell command..."
-	termInput.Prompt = "$ "
-
 	m := Model{
-		version:      version,
-		repoPaths:    repoPaths,
-		repoNames:    repoNames,
-		repoConfigs:  repoConfigs,
-		repoItems:    repoItems,
-		linearIssues: linearIssues,
-		linearAPIKey: linearAPIKey,
-		agentCommand: agentCommand,
-		pickerCursor: -1,
-		filter:       filterInput,
-		createInput:  createInput,
-		termInput:    termInput,
-		sortMode:     sortModeAgent,
+		version:         version,
+		repoPaths:       repoPaths,
+		repoNames:       repoNames,
+		repoConfigs:     repoConfigs,
+		repoItems:       repoItems,
+		linearIssues:    linearIssues,
+		linearAPIKey:    linearAPIKey,
+		agentCommand:    agentCommand,
+		companionPaneID: companionPaneID,
+		pickerCursor:    -1,
+		filter:          filterInput,
+		createInput:     createInput,
+		sortMode:        sortModeAgent,
 	}
 	m.rebuild()
 	return m
@@ -317,9 +313,17 @@ func (m Model) footerLineCount() int {
 	return 1
 }
 
+func (m Model) statusLineCount() int {
+	n := len(m.outputLines)
+	if n > 3 {
+		return 3
+	}
+	return n
+}
+
 func (m Model) listHeight() int {
-	// top-pad(1) + header(1) + blank(1) + filter(1) + blank(1) + divider(1) + footer(N)
-	fixed := 6 + m.footerLineCount()
+	// top-pad(1) + header(1) + blank(1) + filter(1) + blank(1) + status(N) + divider(1) + footer(N)
+	fixed := 6 + m.statusLineCount() + m.footerLineCount()
 	h := m.height - fixed
 	if h < 1 {
 		return 1
@@ -327,22 +331,9 @@ func (m Model) listHeight() int {
 	return h
 }
 
-func (m Model) leftPanelWidth() int  { return m.width / 2 }
-func (m Model) rightPanelWidth() int { return m.width - m.leftPanelWidth() - 1 }
 
 func (m Model) launchPanelHeight() int { return m.height / 2 }
 
-func (m Model) outputAreaHeight() int {
-	h := m.height
-	if m.launchPanel != nil {
-		h = h - m.launchPanelHeight() - 1 // top half + split divider
-	}
-	h = h - 1 - termPanelLines // output header + term section
-	if h < 1 {
-		return 1
-	}
-	return h
-}
 
 func (m Model) renderPrompt(ctx workspace.Context) string {
 	home, _ := os.UserHomeDir()
@@ -369,9 +360,6 @@ func (m Model) renderPrompt(ctx workspace.Context) string {
 
 func (m *Model) appendOutput(line string) {
 	m.outputLines = append(m.outputLines, line)
-	if excess := len(m.outputLines) - m.outputAreaHeight(); excess > 0 {
-		m.outputScroll = excess
-	}
 }
 
 func (m *Model) activeContextPath() string {
@@ -540,11 +528,6 @@ type deleteContextResultMsg struct {
 	newContexts []workspace.Context // fresh list fetched immediately after the operation
 }
 
-type termCmdResultMsg struct {
-	output string
-	err    error
-}
-
 type clipboardMsg struct {
 	path string
 	err  error
@@ -607,22 +590,6 @@ func deleteContextCmd(repoIdx int, repoPath string, ctx workspace.Context, force
 	}
 }
 
-func runTermCmd(contextPath, input string) tea.Cmd {
-	return func() tea.Msg {
-		if strings.TrimSpace(input) == "" {
-			return termCmdResultMsg{}
-		}
-		shell := os.Getenv("SHELL")
-		if shell == "" {
-			shell = "/bin/sh"
-		}
-		cmd := exec.Command(shell, "-c", input)
-		cmd.Dir = contextPath
-		outputBytes, err := cmd.CombinedOutput()
-		return termCmdResultMsg{output: strings.TrimSpace(string(outputBytes)), err: err}
-	}
-}
-
 func copyToClipboardCmd(path string) tea.Cmd {
 	return func() tea.Msg {
 		err := clipboard.WriteAll(path)
@@ -636,12 +603,6 @@ func fetchLinearIssuesCmd(apiKey string) tea.Cmd {
 		issues, err := client.FetchAssignedIssues()
 		return linearIssuesLoadedMsg{issues: issues, err: err}
 	}
-}
-
-func attachAgentCmd(contextPath, command string) tea.Cmd {
-	return tea.ExecProcess(agent.AttachCommand(contextPath, command), func(err error) tea.Msg {
-		return agentAttachFinishedMsg{err: err}
-	})
 }
 
 func launchAgentBackgroundCmd(contextPath, command string) tea.Cmd {
@@ -664,7 +625,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		if m.launchPanel != nil {
 			newPanel, cmd := m.launchPanel.Update(tea.WindowSizeMsg{
-				Width:  m.rightPanelWidth(),
+				Width:  m.width,
 				Height: m.launchPanelHeight(),
 			})
 			*m.launchPanel = newPanel
@@ -735,17 +696,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyRefresh(refreshMsg{repoIdx: msg.repoIdx, contexts: msg.newContexts})
 		return m, nil
 
-	case termCmdResultMsg:
-		if msg.output != "" {
-			for _, line := range strings.Split(msg.output, "\n") {
-				m.appendOutput(line)
-			}
-		}
-		if msg.err != nil {
-			m.appendOutput(styleDanger.Render("Exit: " + msg.err.Error()))
-		}
-		return m, nil
-
 	case clipboardMsg:
 		if msg.err != nil {
 			m.appendOutput(styleDanger.Render("✗ Clipboard: " + msg.err.Error()))
@@ -768,7 +718,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case agentAttachFinishedMsg:
 		if msg.err != nil {
-			m.appendOutput(styleDanger.Render("✗ Agent attach: " + msg.err.Error()))
+			m.appendOutput(styleDanger.Render("✗ Agent: " + msg.err.Error()))
 		}
 		return m, nil
 
@@ -802,24 +752,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.launchPanel != nil {
 			// Toggle focus between context list and launch panel.
 			m.launchFocused = !m.launchFocused
-			if !m.launchFocused {
-				m.termFocused = false
-			}
-		} else {
-			// Toggle terminal focus (original behaviour).
-			m.termFocused = !m.termFocused
-			if m.termFocused {
-				m.termInput.Focus()
-				m.filter.Blur()
-				m.createInput.Blur()
-			} else {
-				if m.mode == modeCreating {
-					m.createInput.Focus()
-				} else {
-					m.filter.Focus()
-				}
-				m.termInput.Blur()
-			}
 		}
 		return m, nil
 	}
@@ -840,42 +772,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	if m.termFocused {
-		return m.handleTermKey(msg)
-	}
 	return m.handleListKey(msg)
-}
-
-func (m Model) handleTermKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEnter:
-		input := strings.TrimSpace(m.termInput.Value())
-		if input == "" {
-			return m, nil
-		}
-		contextPath := m.activeContextPath()
-		m.appendOutput(styleDim.Render("$ "+input) + " " + styleDim.Render("["+filepath.Base(contextPath)+"]"))
-		m.termInput.SetValue("")
-		return m, runTermCmd(contextPath, input)
-	case tea.KeyUp:
-		if m.outputScroll > 0 {
-			m.outputScroll--
-		}
-		return m, nil
-	case tea.KeyDown:
-		maxScroll := len(m.outputLines) - m.outputAreaHeight()
-		if maxScroll < 0 {
-			maxScroll = 0
-		}
-		if m.outputScroll < maxScroll {
-			m.outputScroll++
-		}
-		return m, nil
-	default:
-		var cmd tea.Cmd
-		m.termInput, cmd = m.termInput.Update(msg)
-		return m, cmd
-	}
 }
 
 func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -910,6 +807,14 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			ctx := m.filteredItems[r.repoIdx][r.itemIdx].context
 			m.selectedContextPath = ctx.Path
 			m.appendOutput(m.renderPrompt(ctx))
+			// Send cd to companion terminal pane.
+			if m.companionPaneID != "" {
+				escapedPath := strings.ReplaceAll(ctx.Path, "'", "'\\''")
+				exec.Command("tmux", "send-keys", "-t", m.companionPaneID, "C-c", "").Run()
+				exec.Command("tmux", "send-keys", "-t", m.companionPaneID,
+					fmt.Sprintf("cd '%s'", escapedPath), "Enter").Run()
+				exec.Command("tmux", "send-keys", "-t", m.companionPaneID, "C-l", "").Run()
+			}
 		}
 		return m, nil
 	}
@@ -935,6 +840,10 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "a":
 		if m.filterValue == "" {
 			return m.toggleAgent()
+		}
+	case "A":
+		if m.filterValue == "" {
+			return m.attachAgentFullscreen()
 		}
 	case "s":
 		m.cycleSortMode()
@@ -1161,7 +1070,7 @@ func (m Model) toggleLaunch() (tea.Model, tea.Cmd) {
 
 	// Size the launch panel to the top half of the right panel.
 	sizedPanel, sizeCmd := m.launchPanel.Update(tea.WindowSizeMsg{
-		Width:  m.rightPanelWidth(),
+		Width:  m.width,
 		Height: m.launchPanelHeight(),
 	})
 	*m.launchPanel = sizedPanel
@@ -1171,23 +1080,52 @@ func (m Model) toggleLaunch() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) toggleAgent() (tea.Model, tea.Cmd) {
-	if m.cursor >= len(m.rows) || m.rows[m.cursor].kind != rowTypeContext {
+	if m.companionPaneID == "" {
 		return m, nil
 	}
-
-	if m.launchPanel != nil {
-		if err := m.launchPanel.SaveState(); err != nil {
-			m.appendOutput(styleWarning.Render("⚠ Save state: " + err.Error()))
-		}
-		m.launchPanel = nil
-		m.launchFocused = false
+	if m.cursor >= len(m.rows) || m.rows[m.cursor].kind != rowTypeContext {
+		return m, nil
 	}
 
 	r := m.rows[m.cursor]
 	contextPath := m.filteredItems[r.repoIdx][r.itemIdx].context.Path
 	command := agent.PreferredCommand(m.agentCommand)
-	m.appendOutput(styleDim.Render("Attaching agent in " + filepath.Base(contextPath) + ": " + command + "  (ctrl+q to detach)"))
-	return m, attachAgentCmd(contextPath, command)
+
+	// Build the command to run in the companion pane: attach to existing tmux
+	// agent session, or start a new one (with --resume if we have a session ID).
+	agentCommand := command
+	if !agent.SessionExists(contextPath, command) {
+		if strings.Fields(command)[0] == "claude" {
+			if sessionID, _ := agent.ReadSessionID(contextPath); sessionID != "" {
+				agentCommand = command + " --resume " + sessionID
+			}
+		}
+	}
+
+	// Respawn the companion pane with the agent command in the context directory.
+	escapedPath := strings.ReplaceAll(contextPath, "'", "'\\''")
+	exec.Command("tmux", "respawn-pane", "-k", "-t", m.companionPaneID,
+		"-c", contextPath, fmt.Sprintf("exec %s", agentCommand)).Run()
+
+	m.appendOutput(styleDim.Render("Agent: " + filepath.Base(escapedPath) + " (" + command + ")"))
+
+	// Focus the companion pane.
+	exec.Command("tmux", "select-pane", "-t", m.companionPaneID).Run()
+	return m, nil
+}
+
+func (m Model) attachAgentFullscreen() (tea.Model, tea.Cmd) {
+	if m.cursor >= len(m.rows) || m.rows[m.cursor].kind != rowTypeContext {
+		return m, nil
+	}
+
+	r := m.rows[m.cursor]
+	contextPath := m.filteredItems[r.repoIdx][r.itemIdx].context.Path
+	command := agent.PreferredCommand(m.agentCommand)
+	m.appendOutput(styleDim.Render("Attaching agent (fullscreen): " + filepath.Base(contextPath) + "  (ctrl+q to detach)"))
+	return m, tea.ExecProcess(agent.AttachCommand(contextPath, command), func(err error) tea.Msg {
+		return agentAttachFinishedMsg{err: err}
+	})
 }
 
 func (m *Model) applyRefresh(msg refreshMsg) {
@@ -1226,35 +1164,7 @@ func (m Model) View() string {
 		return ""
 	}
 
-	leftW := m.leftPanelWidth()
-	rightW := m.rightPanelWidth()
-
-	leftLines := strings.Split(m.renderLeft(leftW), "\n")
-	rightLines := strings.Split(m.renderRight(rightW), "\n")
-
-	for len(leftLines) < m.height {
-		leftLines = append(leftLines, "")
-	}
-	for len(rightLines) < m.height {
-		rightLines = append(rightLines, "")
-	}
-
-	sep := styleDim.Render("│")
-	var result []string
-	for i := 0; i < m.height; i++ {
-		left := padToWidth(leftLines[i], leftW)
-		right := padToWidth(rightLines[i], rightW)
-		result = append(result, left+sep+right)
-	}
-	return strings.Join(result, "\n")
-}
-
-func padToWidth(line string, width int) string {
-	visible := lipgloss.Width(line)
-	if visible < width {
-		return line + strings.Repeat(" ", width-visible)
-	}
-	return line
+	return m.renderLeft(m.width)
 }
 
 func (m Model) renderLeft(w int) string {
@@ -1289,16 +1199,26 @@ func (m Model) renderLeft(w int) string {
 
 	footer := m.renderFooter(w)
 
-	return strings.Join([]string{
+	// Show last few status messages above the divider.
+	statusCount := m.statusLineCount()
+	var statusLines []string
+	for i := len(m.outputLines) - statusCount; i < len(m.outputLines); i++ {
+		statusLines = append(statusLines, "  "+m.outputLines[i])
+	}
+
+	parts := []string{
 		"",
 		header,
 		"",
 		filterRow,
 		"",
 		strings.Join(rendered, "\n"),
-		divider,
-		footer,
-	}, "\n")
+	}
+	if len(statusLines) > 0 {
+		parts = append(parts, strings.Join(statusLines, "\n"))
+	}
+	parts = append(parts, divider, footer)
+	return strings.Join(parts, "\n")
 }
 
 func (m Model) renderFooter(w int) string {
@@ -1347,62 +1267,10 @@ func (m Model) renderFooter(w int) string {
 			}
 			launchHint = "  l: Close Launch  "
 		}
-		return styleDim.Render("  ↑↓/jk: Nav  enter: Terminal  n: New  d: Del  c: Copy  a: Attach Agent  l: Launch  s: Sort("+m.sortModeLabel()+")  tab: Focus  q: Quit") + launchHint
+		return styleDim.Render("  ↑↓/jk: Nav  enter: Select  n: New  d: Del  c: Copy  a: Agent  l: Launch  s: Sort("+m.sortModeLabel()+")  ctrl+w: Terminal  q: Quit") + launchHint
 	}
 }
 
-func (m Model) renderRight(w int) string {
-	if m.launchPanel != nil {
-		launchH := m.launchPanelHeight()
-		launchLines := strings.Split(m.launchPanel.View(), "\n")
-		for len(launchLines) < launchH {
-			launchLines = append(launchLines, "")
-		}
-		launchLines = launchLines[:launchH]
-
-		splitDivider := styleDim.Render(strings.Repeat("─", w))
-		termH := m.height - launchH - 1
-		return strings.Join(launchLines, "\n") + "\n" + splitDivider + "\n" + m.renderTerminal(w, termH)
-	}
-	return m.renderTerminal(w, m.height)
-}
-
-func (m Model) renderTerminal(w, h int) string {
-	divider := styleDim.Render(strings.Repeat("─", w))
-	outH := h - 1 - termPanelLines // 1 for output header line
-	if outH < 0 {
-		outH = 0
-	}
-
-	outputHeader := styleDim.Render(" Output")
-
-	outputRendered := make([]string, 0, outH)
-	for i := 0; i < outH; i++ {
-		lineIdx := m.outputScroll + i
-		if lineIdx < len(m.outputLines) {
-			outputRendered = append(outputRendered, " "+m.outputLines[lineIdx])
-		} else {
-			outputRendered = append(outputRendered, "")
-		}
-	}
-
-	var focusIndicator string
-	if m.termFocused {
-		focusIndicator = styleStatus.Render("● ")
-	} else {
-		focusIndicator = styleDim.Render("○ ")
-	}
-	termHeader := " " + focusIndicator + styleDim.Render("Terminal  (tab: Toggle  ↑↓: Scroll)")
-	termLine := " " + m.termInput.View()
-
-	return strings.Join([]string{
-		outputHeader,
-		strings.Join(outputRendered, "\n"),
-		divider,
-		termHeader,
-		termLine,
-	}, "\n")
-}
 
 func (m Model) renderRow(r row, selected bool, w int) string {
 	switch r.kind {

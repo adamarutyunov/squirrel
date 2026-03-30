@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -23,10 +25,34 @@ func main() {
 		return
 	}
 
+	if len(os.Args) > 1 && os.Args[1] == "--install-hooks" {
+		if err := agent.InstallHooks(); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		fmt.Println("Claude hooks installed successfully.")
+		return
+	}
+
+	// Ensure we're running inside tmux for companion terminal pane.
+	if os.Getenv("TMUX") == "" {
+		launchInTmux()
+		return
+	}
+
 	dir, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
+	}
+
+	// Create companion shell pane on the right.
+	companionPaneID := createCompanionPane(dir)
+	if companionPaneID != "" {
+		defer func() {
+			exec.Command("tmux", "kill-pane", "-t", companionPaneID).Run()
+			exec.Command("tmux", "unbind-key", "-n", "C-w").Run()
+		}()
 	}
 
 	repoPaths, err := git.DiscoverRepos(dir)
@@ -93,11 +119,46 @@ func main() {
 		fmt.Fprintln(os.Stderr, "warning: user config:", err)
 	}
 
-	model := ui.NewModel(repoPaths, repoContexts, repoConfigs, linearIssues, os.Getenv("LINEAR_API_KEY"), userConfig.AgentCommand, Version)
+	model := ui.NewModel(repoPaths, repoContexts, repoConfigs, linearIssues, os.Getenv("LINEAR_API_KEY"), userConfig.AgentCommand, companionPaneID, Version)
 	program := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := program.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
+}
+
+func launchInTmux() {
+	exePath, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+	cmd := exec.Command("sh", "-c", fmt.Sprintf(
+		`tmux new-session '%s' \; set mouse on`,
+		exePath,
+	))
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		os.Exit(1)
+	}
+}
+
+func createCompanionPane(dir string) string {
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/sh"
+	}
+	output, err := exec.Command("tmux", "split-window", "-h", "-d", "-c", dir, "-P", "-F", "#{pane_id}", shell).Output()
+	if err != nil {
+		return ""
+	}
+	paneID := strings.TrimSpace(string(output))
+
+	// Bind Ctrl+W to toggle between panes (works from either pane).
+	exec.Command("tmux", "bind-key", "-n", "C-w", "select-pane", "-t", ":.+").Run()
+
+	return paneID
 }
