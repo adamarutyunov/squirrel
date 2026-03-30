@@ -91,9 +91,10 @@ type Model struct {
 	cursor       int
 	scrollOffset int
 
-	filter      textinput.Model
-	filterValue string
-	sortMode    sortMode
+	filter       textinput.Model
+	filterValue  string
+	filterActive bool
+	sortMode     sortMode
 
 	width  int
 	height int
@@ -162,8 +163,8 @@ func NewModel(
 	}
 
 	filterInput := textinput.New()
-	filterInput.Placeholder = "type..."
-	filterInput.Focus()
+	filterInput.Placeholder = "ctrl+f to search..."
+	filterInput.Blur()
 	filterInput.Prompt = ""
 
 	createInput := textinput.New()
@@ -786,28 +787,41 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.mode = modeBrowsing
 			return m, nil
 		}
-		if m.filterValue != "" {
-			m.filter.SetValue("")
-			m.filterValue = ""
-			m.rebuild()
+		if m.filterActive {
+			m.filterActive = false
+			m.filter.Blur()
+			if m.filterValue != "" {
+				m.filter.SetValue("")
+				m.filterValue = ""
+				m.rebuild()
+			}
+			return m, nil
 		}
 		return m, nil
 
 	case tea.KeyUp:
+		m.filterActive = false
+		m.filter.Blur()
 		m.moveCursor(-1)
 		return m, nil
 
 	case tea.KeyDown:
+		m.filterActive = false
+		m.filter.Blur()
 		m.moveCursor(1)
 		return m, nil
 
 	case tea.KeyEnter:
+		if m.filterActive {
+			m.filterActive = false
+			m.filter.Blur()
+			return m, nil
+		}
 		if m.cursor < len(m.rows) && m.rows[m.cursor].kind == rowTypeContext {
 			r := m.rows[m.cursor]
 			ctx := m.filteredItems[r.repoIdx][r.itemIdx].context
 			m.selectedContextPath = ctx.Path
 			m.appendOutput(m.renderPrompt(ctx))
-			// Send cd to companion terminal pane.
 			if m.companionPaneID != "" {
 				escapedPath := strings.ReplaceAll(ctx.Path, "'", "'\\''")
 				exec.Command("tmux", "send-keys", "-t", m.companionPaneID, "C-c", "").Run()
@@ -819,36 +833,47 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Ctrl+F toggles filter mode.
+	if msg.String() == "ctrl+f" {
+		m.filterActive = !m.filterActive
+		if m.filterActive {
+			m.filter.Focus()
+		} else {
+			m.filter.Blur()
+		}
+		return m, nil
+	}
+
+	// When filter is active, forward all keys to the filter input.
+	if m.filterActive {
+		prevValue := m.filterValue
+		var cmd tea.Cmd
+		m.filter, cmd = m.filter.Update(msg)
+		m.filterValue = m.filter.Value()
+		if m.filterValue != prevValue {
+			m.mode = modeBrowsing
+			m.rebuild()
+		}
+		return m, cmd
+	}
+
+	// Shortcuts (only when filter is not active).
 	key := msg.String()
 	switch key {
 	case "d":
-		if m.filterValue == "" {
-			return m.handleDeleteKey()
-		}
+		return m.handleDeleteKey()
 	case "n":
-		if m.filterValue == "" {
-			return m.startCreateContext()
-		}
+		return m.startCreateContext()
 	case "c":
-		if m.filterValue == "" {
-			return m.copyContextPath()
-		}
+		return m.copyContextPath()
 	case "l":
-		if m.filterValue == "" {
-			return m.openLaunch()
-		}
+		return m.openLaunch()
 	case "L":
-		if m.filterValue == "" {
-			return m.closeLaunch()
-		}
+		return m.closeLaunch()
 	case "a":
-		if m.filterValue == "" {
-			return m.toggleAgent()
-		}
+		return m.toggleAgent()
 	case "A":
-		if m.filterValue == "" {
-			return m.attachAgentFullscreen()
-		}
+		return m.attachAgentFullscreen()
 	case "s":
 		m.cycleSortMode()
 		return m, nil
@@ -859,20 +884,10 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.moveCursor(-1)
 		return m, nil
 	case "q":
-		if m.filterValue == "" {
-			return m, tea.Quit
-		}
+		return m, tea.Quit
 	}
 
-	prevValue := m.filterValue
-	var cmd tea.Cmd
-	m.filter, cmd = m.filter.Update(msg)
-	m.filterValue = m.filter.Value()
-	if m.filterValue != prevValue {
-		m.mode = modeBrowsing
-		m.rebuild()
-	}
-	return m, cmd
+	return m, nil
 }
 
 func (m Model) handleCreateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1135,9 +1150,13 @@ func (m Model) toggleAgent() (tea.Model, tea.Cmd) {
 	// agent session, or start a new one (with --resume if we have a session ID).
 	agentCommand := command
 	if !agent.SessionExists(contextPath, command) {
-		if strings.Fields(command)[0] == "claude" {
-			if sessionID, _ := agent.ReadSessionID(contextPath); sessionID != "" {
-				agentCommand = command + " --resume " + sessionID
+		commandBase := strings.Fields(command)[0]
+		if sessionID, _ := agent.ReadSessionID(contextPath); sessionID != "" {
+			switch commandBase {
+			case "claude":
+				agentCommand = fmt.Sprintf("%s --resume %s || %s", command, sessionID, command)
+			case "codex":
+				agentCommand = fmt.Sprintf("%s resume %s || %s", command, sessionID, command)
 			}
 		}
 	}
@@ -1147,10 +1166,15 @@ func (m Model) toggleAgent() (tea.Model, tea.Cmd) {
 		agent.WriteStatus(contextPath, agent.StatusIdle)
 	}
 
-	// Respawn the companion pane with the agent command in the context directory.
+	// Respawn companion pane: run agent, then drop back to shell on exit.
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/sh"
+	}
 	escapedPath := strings.ReplaceAll(contextPath, "'", "'\\''")
 	exec.Command("tmux", "respawn-pane", "-k", "-t", m.companionPaneID,
-		"-c", contextPath, fmt.Sprintf("exec %s", agentCommand)).Run()
+		"-c", contextPath,
+		fmt.Sprintf("%s; exec %s", agentCommand, shell)).Run()
 
 	m.appendOutput(styleDim.Render("Agent: " + filepath.Base(escapedPath) + " (" + command + ")"))
 

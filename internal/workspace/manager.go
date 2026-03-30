@@ -31,7 +31,7 @@ type Context struct {
 
 // ListContexts returns all contexts for the repository at repoPath.
 // Linear issues are attached to contexts whose branch names contain matching identifiers.
-func ListContexts(repoPath string, linearIssues map[string]linear.Issue) ([]Context, error) {
+func ListContexts(repoPath string, linearIssues map[string]linear.Issue, resetThinking ...bool) ([]Context, error) {
 	worktrees, err := git.ListWorktrees(repoPath)
 	if err != nil {
 		return nil, err
@@ -54,6 +54,12 @@ func ListContexts(repoPath string, linearIssues map[string]linear.Issue) ([]Cont
 		status, err := agent.ReadStatus(wt.Path)
 		if err == nil {
 			ctx.AgentStatus = status.State
+		}
+		// On first load, reset stale thinking states to idle.
+		// Running agents will update back to thinking via hooks.
+		if len(resetThinking) > 0 && resetThinking[0] && ctx.AgentStatus == agent.StatusThinking {
+			agent.WriteStatus(wt.Path, agent.StatusIdle)
+			ctx.AgentStatus = agent.StatusIdle
 		}
 		for _, match := range linearIDRegex.FindAllString(wt.Branch, -1) {
 			if issue, ok := linearIssues[strings.ToUpper(match)]; ok {

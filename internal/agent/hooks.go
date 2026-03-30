@@ -43,7 +43,7 @@ func HandleHook(reader io.Reader) error {
 		}
 		return nil
 	case "SessionEnd":
-		return RemoveStatus(hookInput.Cwd)
+		return WriteStatus(hookInput.Cwd, StatusDone)
 	default:
 		return nil
 	}

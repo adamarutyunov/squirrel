@@ -109,7 +109,7 @@ func main() {
 		}
 		repoConfigs[i] = cfg
 
-		contexts, err := workspace.ListContexts(repoPath, linearIssues)
+		contexts, err := workspace.ListContexts(repoPath, linearIssues, true)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: %s: %v\n", filepath.Base(repoPath), err)
 			continue

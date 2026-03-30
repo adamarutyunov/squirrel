@@ -36,23 +36,23 @@ func AttachCommand(contextPath, command string) *exec.Cmd {
 	}
 
 	// No existing session — start a new one.
-	// Resume the last session if we have a saved session ID.
+	// Try to resume the last session; fall back to fresh start if resume fails.
 	agentCommand := command
 	commandBase := strings.Fields(command)[0]
 	if sessionID, _ := ReadSessionID(contextPath); sessionID != "" {
 		switch commandBase {
 		case "claude":
-			agentCommand = command + " --resume " + sessionID
+			agentCommand = fmt.Sprintf("%s --resume %s || %s", command, sessionID, command)
 		case "codex":
-			agentCommand = command + " resume " + sessionID
+			agentCommand = fmt.Sprintf("%s resume %s || %s", command, sessionID, command)
 		}
 	}
 
 	// Bind Ctrl+Q to detach for easy exit (simpler than default Ctrl+B, D).
 	escapedPath := strings.ReplaceAll(contextPath, "'", "'\\''")
 	shellCommand := fmt.Sprintf(
-		`tmux new-session -s '%s' -c '%s' -E 'exec %s' \; bind-key -n C-q detach-client`,
-		sessionName, escapedPath, agentCommand,
+		`tmux new-session -s '%s' -c '%s' -E 'exec sh -c "%s"' \; bind-key -n C-q detach-client`,
+		sessionName, escapedPath, strings.ReplaceAll(agentCommand, `"`, `\"`),
 	)
 	return exec.Command("sh", "-c", shellCommand)
 }
