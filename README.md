@@ -19,7 +19,7 @@ Squirrel gives you a single terminal UI to manage contexts, run agents in them, 
 - **Agent management** — launch Claude or Codex agents per context, track their status live, attach side-by-side or fullscreen;
 - **Task manager integration** — link Linear issues to your worktrees by task name, or create new contexts out of issues;
 - **Companion terminal pane** — a real shell runs side-by-side with squirrel; `Ctrl+W` to toggle between them;
-- **Launch integration** — embedded [launch](https://github.com/adamarutyunov/launch) panel for managing project processes per context;
+- **Launch integration** — embedded [launch](https://github.com/adamarutyunov/launch) panels for managing project processes; one panel per project, switching contexts within a project restarts processes automatically;
 - **Session resume** — sessions are persistent, reopen squirrel and reattach to existing agent sessions.
 
 ## Install
@@ -38,15 +38,15 @@ go build -o ~/bin/sq .
 
 ## Setup
 
-### 1. Install Claude hooks
+### 1. Install agent hooks
 
-Squirrel tracks agent status (idle/working/done) via Claude Code hooks. Run:
+Squirrel tracks agent status (idle/working/done) via hooks. Run:
 
 ```sh
 sq --install-hooks
 ```
 
-This writes the required hooks to `~/.claude/settings.json`. If you already have hooks configured, it will overwrite the `hooks` key — back up your settings first if needed.
+This installs hooks for both Claude (`~/.claude/settings.json`) and Codex (`~/.codex/hooks.json`, plus enables the `codex_hooks` feature flag). If you already have hooks configured, it will overwrite the `hooks` key — back up your settings first if needed.
 
 ### 2. Set Linear API key (optional)
 
@@ -115,9 +115,11 @@ Project configs are stored outside the repo so they stay local to your machine.
 | `c` | Copy context path to clipboard |
 | `a` | Launch agent in companion pane |
 | `A` | Launch agent fullscreen (Ctrl+Q to detach) |
-| `l` | Toggle launch panel |
+| `l` | Open launch for context (no-op if already open; switches if different context in same project) |
+| `L` | Kill launch for current project |
 | `s` | Cycle sort mode (Agent / Alpha / Linear / Updated) |
-| `Ctrl+W` | Toggle between terminal and context panes |
+| `Tab` | Cycle focus: context list → launch panels → context list |
+| `Ctrl+W` | Toggle between squirrel and terminal pane |
 | `q` | Quit |
 
 Bug reports and pull requests are welcome at [github.com/adamarutyunov/squirrel](https://github.com/adamarutyunov/squirrel/issues).
