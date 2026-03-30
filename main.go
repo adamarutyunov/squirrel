@@ -88,7 +88,12 @@ func main() {
 		repoContexts[i] = contexts
 	}
 
-	model := ui.NewModel(repoPaths, repoContexts, repoConfigs, linearIssues, os.Getenv("LINEAR_API_KEY"), Version)
+	userConfig, err := workspace.LoadUserConfig()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "warning: user config:", err)
+	}
+
+	model := ui.NewModel(repoPaths, repoContexts, repoConfigs, linearIssues, os.Getenv("LINEAR_API_KEY"), userConfig.AgentCommand, Version)
 	program := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := program.Run(); err != nil {

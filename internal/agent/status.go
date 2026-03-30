@@ -73,6 +73,43 @@ func WriteStatus(contextPath, state string) error {
 	return os.WriteFile(statusPath, data, 0o644)
 }
 
+func SessionIDPath(contextPath string) (string, error) {
+	homeDirectory, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+
+	hash := sha1.Sum([]byte(contextPath))
+	fileName := hex.EncodeToString(hash[:8]) + ".session"
+	return filepath.Join(homeDirectory, ".config", "squirrel", "agents", fileName), nil
+}
+
+func WriteSessionID(contextPath, sessionID string) error {
+	sessionIDPath, err := SessionIDPath(contextPath)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(sessionIDPath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(sessionIDPath, []byte(sessionID), 0o644)
+}
+
+func ReadSessionID(contextPath string) (string, error) {
+	sessionIDPath, err := SessionIDPath(contextPath)
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(sessionIDPath)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
 func RemoveStatus(contextPath string) error {
 	statusPath, err := StatusPath(contextPath)
 	if err != nil {

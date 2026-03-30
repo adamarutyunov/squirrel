@@ -117,6 +117,9 @@ type Model struct {
 	// Active context — set by Enter; shown with amber * in the list.
 	selectedContextPath string
 
+	// Pending cursor target — after refresh, move cursor to this path.
+	pendingCursorPath string
+
 	// Right panel: output log + terminal (shown when launch panel is inactive).
 	outputLines  []string
 	outputScroll int
@@ -126,6 +129,12 @@ type Model struct {
 	// Right panel: launch integration (when active, replaces terminal panel).
 	launchPanel   *embed.Model
 	launchFocused bool
+
+	// Spinner animation frame counter (incremented every tick).
+	spinnerFrame int
+
+	// Agent command from user config.
+	agentCommand string
 }
 
 func NewModel(
@@ -134,6 +143,7 @@ func NewModel(
 	repoConfigs []workspace.Config,
 	linearIssues map[string]linear.Issue,
 	linearAPIKey string,
+	agentCommand string,
 	version string,
 ) Model {
 	repoNames := make([]string, len(repoPaths))
@@ -171,6 +181,7 @@ func NewModel(
 		repoItems:    repoItems,
 		linearIssues: linearIssues,
 		linearAPIKey: linearAPIKey,
+		agentCommand: agentCommand,
 		pickerCursor: -1,
 		filter:       filterInput,
 		createInput:  createInput,
@@ -548,10 +559,14 @@ type agentAttachFinishedMsg struct {
 	err error
 }
 
+type agentLaunchBackgroundMsg struct {
+	err error
+}
+
 // --- Tea commands ---
 
 func tickCmd() tea.Cmd {
-	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg { return tickMsg(t) })
+	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
 func refreshRepoCmd(repoIdx int, repoPath string, linearIssues map[string]linear.Issue) tea.Cmd {
@@ -629,6 +644,13 @@ func attachAgentCmd(contextPath, command string) tea.Cmd {
 	})
 }
 
+func launchAgentBackgroundCmd(contextPath, command string) tea.Cmd {
+	return func() tea.Msg {
+		err := agent.LaunchBackground(contextPath, command)
+		return agentLaunchBackgroundMsg{err: err}
+	}
+}
+
 // --- BubbleTea interface ---
 
 func (m Model) Init() tea.Cmd {
@@ -651,11 +673,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
-		cmds := make([]tea.Cmd, len(m.repoPaths)+1)
-		for i, path := range m.repoPaths {
-			cmds[i] = refreshRepoCmd(i, path, m.linearIssues)
+		m.spinnerFrame++
+		cmds := []tea.Cmd{tickCmd()}
+		// Refresh repos every 4th tick (~2 seconds).
+		if m.spinnerFrame%4 == 0 {
+			for i, path := range m.repoPaths {
+				cmds = append(cmds, refreshRepoCmd(i, path, m.linearIssues))
+			}
 		}
-		cmds[len(m.repoPaths)] = tickCmd()
 		return m, tea.Batch(cmds...)
 
 	case refreshMsg:
@@ -677,14 +702,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.appendOutput(styleStatus.Render("✓ Created '" + msg.contextName + "'"))
 		m.appendOutput(styleDim.Render("  " + msg.worktreePath))
+		m.pendingCursorPath = msg.worktreePath
 
 		cfg := m.repoConfigs[msg.repoIdx]
 		refreshCmd := refreshRepoCmd(msg.repoIdx, m.repoPaths[msg.repoIdx], m.linearIssues)
+		agentCmd := launchAgentBackgroundCmd(msg.worktreePath, agent.PreferredCommand(m.agentCommand))
 		if cfg.SetupCommand != "" {
 			m.appendOutput(styleDim.Render("  Running: " + cfg.SetupCommand))
-			return m, tea.Batch(refreshCmd, setupCommandCmd(msg.worktreePath, cfg.SetupCommand))
+			return m, tea.Batch(refreshCmd, setupCommandCmd(msg.worktreePath, cfg.SetupCommand), agentCmd)
 		}
-		return m, refreshCmd
+		return m, tea.Batch(refreshCmd, agentCmd)
 
 	case setupCommandResultMsg:
 		if msg.output != "" {
@@ -733,12 +760,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendOutput(styleDanger.Render("✗ Linear: " + msg.err.Error()))
 		} else {
 			m.pickerIssues = msg.issues
+			if len(msg.issues) > 0 {
+				m.pickerCursor = 0
+			}
 		}
 		return m, nil
 
 	case agentAttachFinishedMsg:
 		if msg.err != nil {
 			m.appendOutput(styleDanger.Render("✗ Agent attach: " + msg.err.Error()))
+		}
+		return m, nil
+
+	case agentLaunchBackgroundMsg:
+		if msg.err != nil {
+			m.appendOutput(styleDanger.Render("✗ Agent launch: " + msg.err.Error()))
 		}
 		return m, nil
 
@@ -1021,7 +1057,7 @@ func (m Model) handleCreateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.createInput, cmd = m.createInput.Update(msg)
 	if m.createInput.Value() != prevValue {
-		m.pickerCursor = -1
+		m.pickerCursor = 0
 		m.pickerScroll = 0
 	}
 	return m, cmd
@@ -1034,13 +1070,18 @@ func (m Model) startCreateContext() (tea.Model, tea.Cmd) {
 	}
 	m.createRepoIdx = repoIdx
 	m.mode = modeCreating
-	m.pickerCursor = -1
 	m.createInput.Focus()
 	m.filter.Blur()
 
 	if m.linearAPIKey != "" && len(m.pickerIssues) == 0 {
+		m.pickerCursor = 0
 		m.pickerLoading = true
 		return m, fetchLinearIssuesCmd(m.linearAPIKey)
+	}
+	if len(m.pickerIssues) > 0 {
+		m.pickerCursor = 0
+	} else {
+		m.pickerCursor = -1
 	}
 	return m, nil
 }
@@ -1144,16 +1185,17 @@ func (m Model) toggleAgent() (tea.Model, tea.Cmd) {
 
 	r := m.rows[m.cursor]
 	contextPath := m.filteredItems[r.repoIdx][r.itemIdx].context.Path
-	command := agent.PreferredCommand()
-	m.appendOutput(styleDim.Render("Attaching agent in " + filepath.Base(contextPath) + ": " + command))
+	command := agent.PreferredCommand(m.agentCommand)
+	m.appendOutput(styleDim.Render("Attaching agent in " + filepath.Base(contextPath) + ": " + command + "  (ctrl+q to detach)"))
 	return m, attachAgentCmd(contextPath, command)
 }
 
 func (m *Model) applyRefresh(msg refreshMsg) {
-	var cursorContextPath string
-	if m.cursor < len(m.rows) && m.rows[m.cursor].kind == rowTypeContext {
+	// Pending cursor (e.g. newly created context) takes priority.
+	targetPath := m.pendingCursorPath
+	if targetPath == "" && m.cursor < len(m.rows) && m.rows[m.cursor].kind == rowTypeContext {
 		r := m.rows[m.cursor]
-		cursorContextPath = m.filteredItems[r.repoIdx][r.itemIdx].context.Path
+		targetPath = m.filteredItems[r.repoIdx][r.itemIdx].context.Path
 	}
 
 	items := make([]contextItem, len(msg.contexts))
@@ -1163,11 +1205,12 @@ func (m *Model) applyRefresh(msg refreshMsg) {
 	m.repoItems[msg.repoIdx] = items
 	m.rebuild()
 
-	if cursorContextPath != "" {
+	if targetPath != "" {
 		for rowIdx, r := range m.rows {
 			if r.kind == rowTypeContext {
-				if m.filteredItems[r.repoIdx][r.itemIdx].context.Path == cursorContextPath {
+				if m.filteredItems[r.repoIdx][r.itemIdx].context.Path == targetPath {
 					m.cursor = rowIdx
+					m.pendingCursorPath = ""
 					m.ensureVisible()
 					return
 				}
@@ -1461,11 +1504,12 @@ func (m Model) renderContextRow(ctx workspace.Context, namePadded, branchPadded,
 	statusStyle := base.Foreground(colorDim)
 	switch ctx.AgentStatus {
 	case agent.StatusThinking:
-		statusPrefix = "◐ "
-		statusStyle = base.Foreground(colorBlue)
+		spinnerFrames := []string{"◐ ", "◓ ", "◑ ", "◒ "}
+		statusPrefix = spinnerFrames[m.spinnerFrame%len(spinnerFrames)]
+		statusStyle = base.Foreground(colorAmber)
 	case agent.StatusDone:
 		statusPrefix = "● "
-		statusStyle = base.Foreground(colorGreen)
+		statusStyle = base.Foreground(colorBlue)
 	case agent.StatusIdle:
 		statusPrefix = "○ "
 		statusStyle = base.Foreground(colorDim)

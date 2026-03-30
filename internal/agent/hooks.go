@@ -9,6 +9,7 @@ import (
 
 type HookInput struct {
 	HookEventName    string `json:"hook_event_name"`
+	SessionID        string `json:"session_id"`
 	Cwd              string `json:"cwd"`
 	NotificationType string `json:"notification_type"`
 }
@@ -24,6 +25,11 @@ func HandleHook(reader io.Reader) error {
 
 	switch hookInput.HookEventName {
 	case "SessionStart":
+		if hookInput.SessionID != "" {
+			if err := WriteSessionID(hookInput.Cwd, hookInput.SessionID); err != nil {
+				return err
+			}
+		}
 		return WriteStatus(hookInput.Cwd, StatusIdle)
 	case "UserPromptSubmit":
 		return WriteStatus(hookInput.Cwd, StatusThinking)

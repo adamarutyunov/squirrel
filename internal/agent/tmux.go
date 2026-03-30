@@ -9,8 +9,8 @@ import (
 	"strings"
 )
 
-func PreferredCommand() string {
-	if configuredCommand := strings.TrimSpace(os.Getenv("SQUIRREL_AGENT_COMMAND")); configuredCommand != "" {
+func PreferredCommand(userConfigCommand string) string {
+	if configuredCommand := strings.TrimSpace(userConfigCommand); configuredCommand != "" {
 		return configuredCommand
 	}
 	if _, err := exec.LookPath("claude"); err == nil {
@@ -24,14 +24,59 @@ func PreferredCommand() string {
 
 func AttachCommand(contextPath, command string) *exec.Cmd {
 	sessionName := sessionNameFor(contextPath, command)
-	return exec.Command(
-		"tmux",
-		"new-session",
-		"-A",
+	sessionExists := SessionExists(contextPath, command)
+
+	// If session already exists, just attach to it.
+	if sessionExists {
+		shellCommand := fmt.Sprintf(
+			`tmux attach-session -t '%s' \; bind-key -n C-q detach-client`,
+			sessionName,
+		)
+		return exec.Command("sh", "-c", shellCommand)
+	}
+
+	// No existing session — start a new one.
+	// For claude-based commands, resume the last session if we have a saved session ID.
+	agentCommand := command
+	commandBase := strings.Fields(command)[0]
+	if commandBase == "claude" {
+		if sessionID, _ := ReadSessionID(contextPath); sessionID != "" {
+			agentCommand = command + " --resume " + sessionID
+		}
+	}
+
+	// Bind Ctrl+Q to detach for easy exit (simpler than default Ctrl+B, D).
+	escapedPath := strings.ReplaceAll(contextPath, "'", "'\\''")
+	shellCommand := fmt.Sprintf(
+		`tmux new-session -s '%s' -c '%s' -E 'exec %s' \; bind-key -n C-q detach-client`,
+		sessionName, escapedPath, agentCommand,
+	)
+	return exec.Command("sh", "-c", shellCommand)
+}
+
+// LaunchBackground starts an agent tmux session in detached mode so it's
+// ready when the user attaches later. No-op if the session already exists.
+func LaunchBackground(contextPath, command string) error {
+	sessionName := sessionNameFor(contextPath, command)
+	// Check if session already exists.
+	checkCommand := exec.Command("tmux", "has-session", "-t", sessionName)
+	if checkCommand.Run() == nil {
+		return nil // session already running
+	}
+	launchCommand := exec.Command(
+		"tmux", "new-session", "-d",
 		"-s", sessionName,
 		"-c", contextPath,
 		"exec "+command,
 	)
+	return launchCommand.Run()
+}
+
+// SessionExists returns true if the tmux session for this context+command exists.
+func SessionExists(contextPath, command string) bool {
+	sessionName := sessionNameFor(contextPath, command)
+	checkCommand := exec.Command("tmux", "has-session", "-t", sessionName)
+	return checkCommand.Run() == nil
 }
 
 func CleanupContext(contextPath string) error {

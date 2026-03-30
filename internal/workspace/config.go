@@ -9,6 +9,38 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// UserConfig holds global per-user squirrel configuration at ~/.config/squirrel/config.yaml.
+type UserConfig struct {
+	AgentCommand string `yaml:"agent_command"`
+}
+
+func UserConfigPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".config", "squirrel", "config.yaml"), nil
+}
+
+func LoadUserConfig() (UserConfig, error) {
+	configPath, err := UserConfigPath()
+	if err != nil {
+		return UserConfig{}, err
+	}
+	data, err := os.ReadFile(configPath)
+	if os.IsNotExist(err) {
+		return UserConfig{}, nil
+	}
+	if err != nil {
+		return UserConfig{}, err
+	}
+	var cfg UserConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return UserConfig{}, err
+	}
+	return cfg, nil
+}
+
 // Config holds per-project squirrel configuration, stored in ~/.config/squirrel/
 // rather than the project repo so it stays local to each developer's machine.
 type Config struct {
