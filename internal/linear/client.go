@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -37,6 +38,26 @@ var identifierRegex = regexp.MustCompile(`^([A-Z][A-Z0-9]+)-(\d+)$`)
 type parsedID struct {
 	teamKey string
 	number  int
+}
+
+type graphQLResponse[T any] struct {
+	Data   T `json:"data"`
+	Errors []struct {
+		Message string `json:"message"`
+	} `json:"errors"`
+}
+
+type issueNode struct {
+	Identifier string `json:"identifier"`
+	Title      string `json:"title"`
+	BranchName string `json:"branchName"`
+	State      struct {
+		Name string `json:"name"`
+	} `json:"state"`
+}
+
+type issueConnection struct {
+	Nodes []issueNode `json:"nodes"`
 }
 
 // FetchIssues retrieves Linear issues by their human-readable identifiers (e.g. ["ENG-123"]).
@@ -77,57 +98,19 @@ func (c *Client) FetchIssues(identifiers []string) (map[string]Issue, error) {
 		return nil, fmt.Errorf("marshal: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, apiEndpoint, bytes.NewReader(body))
+	result, err := c.doQueryMap(body)
 	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", c.apiKey)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("http: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		Data   map[string]json.RawMessage `json:"data"`
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode: %w", err)
-	}
-	if len(result.Errors) > 0 {
-		return nil, fmt.Errorf("linear api: %s", result.Errors[0].Message)
-	}
-
-	type nodeResult struct {
-		Identifier string `json:"identifier"`
-		Title      string `json:"title"`
-		BranchName string `json:"branchName"`
-		State      struct {
-			Name string `json:"name"`
-		} `json:"state"`
-	}
-	type aliasResult struct {
-		Nodes []nodeResult `json:"nodes"`
+		return nil, err
 	}
 
 	issues := make(map[string]Issue)
-	for _, raw := range result.Data {
-		var ar aliasResult
-		if err := json.Unmarshal(raw, &ar); err != nil {
+	for _, raw := range result {
+		var connection issueConnection
+		if err := json.Unmarshal(raw, &connection); err != nil {
 			continue
 		}
-		for _, node := range ar.Nodes {
-			issues[node.Identifier] = Issue{
-				Identifier: node.Identifier,
-				Title:      node.Title,
-				State:      node.State.Name,
-				BranchName: node.BranchName,
-			}
+		for _, node := range connection.Nodes {
+			issues[node.Identifier] = toIssue(node)
 		}
 	}
 	return issues, nil
@@ -158,54 +141,70 @@ func (c *Client) FetchAssignedIssues() ([]Issue, error) {
 		return nil, fmt.Errorf("marshal: %w", err)
 	}
 
+	var result struct {
+		Data struct {
+			Viewer struct {
+				AssignedIssues issueConnection `json:"assignedIssues"`
+			} `json:"viewer"`
+		} `json:"data"`
+	}
+	if err := c.doQuery(body, &result); err != nil {
+		return nil, err
+	}
+
+	nodes := result.Data.Viewer.AssignedIssues.Nodes
+	issues := make([]Issue, 0, len(nodes))
+	for _, node := range nodes {
+		issues = append(issues, toIssue(node))
+	}
+	return issues, nil
+}
+
+func (c *Client) doQueryMap(body []byte) (map[string]json.RawMessage, error) {
+	var result graphQLResponse[map[string]json.RawMessage]
+	if err := c.doQuery(body, &result); err != nil {
+		return nil, err
+	}
+	return result.Data, nil
+}
+
+func (c *Client) doQuery(body []byte, out any) error {
 	req, err := http.NewRequest(http.MethodPost, apiEndpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+		return fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", c.apiKey)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("http: %w", err)
+		return fmt.Errorf("http: %w", err)
 	}
 	defer resp.Body.Close()
 
-	var result struct {
-		Data struct {
-			Viewer struct {
-				AssignedIssues struct {
-					Nodes []struct {
-						Identifier string `json:"identifier"`
-						Title      string `json:"title"`
-						BranchName string `json:"branchName"`
-						State      struct {
-							Name string `json:"name"`
-						} `json:"state"`
-					} `json:"nodes"`
-				} `json:"assignedIssues"`
-			} `json:"viewer"`
-		} `json:"data"`
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read response: %w", err)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode: %w", err)
-	}
-	if len(result.Errors) > 0 {
-		return nil, fmt.Errorf("linear api: %s", result.Errors[0].Message)
+	if err := json.Unmarshal(data, out); err != nil {
+		return fmt.Errorf("decode: %w", err)
 	}
 
-	nodes := result.Data.Viewer.AssignedIssues.Nodes
-	issues := make([]Issue, 0, len(nodes))
-	for _, node := range nodes {
-		issues = append(issues, Issue{
-			Identifier: node.Identifier,
-			Title:      node.Title,
-			State:      node.State.Name,
-			BranchName: node.BranchName,
-		})
+	var envelope graphQLResponse[json.RawMessage]
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return fmt.Errorf("decode errors: %w", err)
 	}
-	return issues, nil
+	if len(envelope.Errors) > 0 {
+		return fmt.Errorf("linear api: %s", envelope.Errors[0].Message)
+	}
+	return nil
+}
+
+func toIssue(node issueNode) Issue {
+	return Issue{
+		Identifier: node.Identifier,
+		Title:      node.Title,
+		State:      node.State.Name,
+		BranchName: node.BranchName,
+	}
 }

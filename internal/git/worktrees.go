@@ -78,9 +78,10 @@ func IsWorktreeDirty(path string) (bool, error) {
 	cmd := exec.Command("git", "-C", path, "status", "--porcelain")
 	output, err := cmd.Output()
 	if err != nil {
-		// If git can't check (broken worktree, etc.), treat as not dirty
-		// so the user can clean it up.
-		return false, nil
+		if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) > 0 {
+			return false, fmt.Errorf("git status: %s", strings.TrimSpace(string(exitErr.Stderr)))
+		}
+		return false, fmt.Errorf("git status failed")
 	}
 	return strings.TrimSpace(string(output)) != "", nil
 }

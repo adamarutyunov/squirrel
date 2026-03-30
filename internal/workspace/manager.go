@@ -115,7 +115,12 @@ func CreateContext(repoPath, contextName, branchName string, cfg Config) (string
 		return "", fmt.Errorf("path already exists: %s", worktreePath)
 	}
 
-	if err := git.AddWorktree(repoPath, worktreePath, branchName, true); err != nil {
+	createBranch, err := shouldCreateBranch(repoPath, branchName)
+	if err != nil {
+		return "", err
+	}
+
+	if err := git.AddWorktree(repoPath, worktreePath, branchName, createBranch); err != nil {
 		return "", err
 	}
 
@@ -132,6 +137,21 @@ func CreateContext(repoPath, contextName, branchName string, cfg Config) (string
 	}
 
 	return worktreePath, nil
+}
+
+func shouldCreateBranch(repoPath, branchName string) (bool, error) {
+	branches, err := git.GetBranches(repoPath)
+	if err != nil {
+		return false, fmt.Errorf("list branches: %w", err)
+	}
+
+	for _, branch := range branches {
+		if branch.Name == branchName {
+			return false, nil
+		}
+	}
+
+	return true, nil
 }
 
 // DeleteContext removes the worktree for ctx.

@@ -36,17 +36,7 @@ func AttachCommand(contextPath, command string) *exec.Cmd {
 	}
 
 	// No existing session — start a new one.
-	// Try to resume the last session; fall back to fresh start if resume fails.
-	agentCommand := command
-	commandBase := strings.Fields(command)[0]
-	if sessionID, _ := ReadSessionID(contextPath); sessionID != "" {
-		switch commandBase {
-		case "claude":
-			agentCommand = fmt.Sprintf("%s --resume %s || %s", command, sessionID, command)
-		case "codex":
-			agentCommand = fmt.Sprintf("%s resume %s || %s", command, sessionID, command)
-		}
-	}
+	agentCommand := SessionCommand(contextPath, command)
 
 	// Bind Ctrl+Q to detach for easy exit (simpler than default Ctrl+B, D).
 	escapedPath := strings.ReplaceAll(contextPath, "'", "'\\''")
@@ -55,6 +45,38 @@ func AttachCommand(contextPath, command string) *exec.Cmd {
 		sessionName, escapedPath, strings.ReplaceAll(agentCommand, `"`, `\"`),
 	)
 	return exec.Command("sh", "-c", shellCommand)
+}
+
+// SessionCommand returns the agent command to run for a context.
+// When a saved session exists, it prefers resuming and falls back to a fresh launch.
+func SessionCommand(contextPath, command string) string {
+	commandBase := strings.Fields(command)
+	if len(commandBase) == 0 {
+		return command
+	}
+
+	sessionID, _ := ReadSessionID(contextPath)
+	if sessionID == "" {
+		return command
+	}
+
+	switch commandBase[0] {
+	case "claude":
+		return fmt.Sprintf("%s --resume %s || %s", command, sessionID, command)
+	case "codex":
+		return fmt.Sprintf("%s resume %s || %s", command, sessionID, command)
+	default:
+		return command
+	}
+}
+
+// MarkAttached resets a completed agent state back to idle before reopening it.
+func MarkAttached(contextPath string) {
+	status, err := ReadStatus(contextPath)
+	if err != nil || status.State != StatusDone {
+		return
+	}
+	_ = WriteStatus(contextPath, StatusIdle)
 }
 
 // LaunchBackground starts an agent tmux session in detached mode so it's
