@@ -32,8 +32,7 @@ func (m Model) View() string {
 func (m Model) renderLeft(w int) string {
 	divider := styleDim.Render(strings.Repeat("─", w))
 
-	titleText := "Squirrel " + m.version
-	title := styleTitle.Render("  " + titleText)
+	title := styleTitle.Render("  Contexts")
 	var subtitle string
 	switch len(m.repoPaths) {
 	case 0:

@@ -53,7 +53,7 @@ func main() {
 	// Create companion shell pane on the right.
 	companionPaneID := createCompanionPane(mainPaneID, dir)
 	if companionPaneID != "" {
-		exec.Command("tmux", "select-pane", "-t", mainPaneID, "-T", "Squirrel").Run()
+		exec.Command("tmux", "select-pane", "-t", mainPaneID, "-T", "Squirrel "+Version).Run()
 		defer func() {
 			exec.Command("tmux", "kill-pane", "-t", companionPaneID).Run()
 			exec.Command("tmux", "unbind-key", "-n", "C-w").Run()
@@ -130,7 +130,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "warning: user config:", err)
 	}
 
-	model := ui.NewModel(repoPaths, repoContexts, repoConfigs, repoLinearIssues, repoLinearAPIKeys, userConfig.AgentCommand, userConfig.SortMode, mainPaneID, companionPaneID, Version)
+	model := ui.NewModel(repoPaths, repoContexts, repoConfigs, repoLinearIssues, repoLinearAPIKeys, userConfig.AgentCommand, userConfig.SortMode, mainPaneID, companionPaneID)
 	program := tea.NewProgram(model, tea.WithAltScreen())
 
 	finalModel, err := program.Run()

@@ -171,17 +171,18 @@ func (m Model) toggleAgentWithForce(force bool) (tea.Model, tea.Cmd) {
 	command := agent.PreferredCommand(m.agentCommand)
 	launchCommand := agent.CommandForIssue(command, ctx.LinearIssue)
 	agent.MarkAttached(contextPath)
-
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = "/bin/sh"
+	if err := agent.LaunchBackground(contextPath, command, launchCommand); err != nil {
+		m.appendOutput(styleDanger.Render("✗ Agent: " + err.Error()))
+		return m, nil
+	}
+	respawnCommand := shellCommand(agent.AttachShellCommand(contextPath, command, launchCommand, true))
+	if err := stmux.RespawnPane(m.companionPaneID, contextPath, "Agent", respawnCommand); err != nil {
+		m.appendOutput(styleDanger.Render("✗ Agent: " + err.Error()))
+		return m, nil
 	}
 
-	respawnCommand := fmt.Sprintf("%s; exec %s", agent.AttachShellCommand(contextPath, command, launchCommand, true), shell)
-	exec.Command("tmux", "respawn-pane", "-k", "-t", m.companionPaneID, "-c", contextPath, respawnCommand).Run()
-
 	m.appendOutput(styleDim.Render("Agent: " + filepath.Base(contextPath) + " (" + command + ")"))
-	exec.Command("tmux", "select-pane", "-t", m.companionPaneID).Run()
+	_ = stmux.SelectPane(m.companionPaneID)
 	return m, nil
 }
 
@@ -211,6 +212,10 @@ func (m Model) attachAgentFullscreenWithForce(force bool) (tea.Model, tea.Cmd) {
 	command := agent.PreferredCommand(m.agentCommand)
 	launchCommand := agent.CommandForIssue(command, ctx.LinearIssue)
 	agent.MarkAttached(contextPath)
+	if err := agent.LaunchBackground(contextPath, command, launchCommand); err != nil {
+		m.appendOutput(styleDanger.Render("✗ Agent: " + err.Error()))
+		return m, nil
+	}
 
 	m.appendOutput(styleDim.Render("Attaching agent (fullscreen): " + filepath.Base(contextPath) + "  (ctrl+q to detach)"))
 	return m, tea.ExecProcess(agent.AttachCommand(contextPath, command, launchCommand), func(err error) tea.Msg {

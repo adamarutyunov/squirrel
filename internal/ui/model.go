@@ -86,7 +86,6 @@ const (
 
 // Model is the BubbleTea model.
 type Model struct {
-	version           string
 	repoPaths         []string
 	repoNames         []string
 	repoConfigs       []workspace.Config
@@ -155,7 +154,6 @@ func NewModel(
 	initialSortMode string,
 	mainPaneID string,
 	companionPaneID string,
-	version string,
 ) Model {
 	repoNames := make([]string, len(repoPaths))
 	for i, path := range repoPaths {
@@ -181,7 +179,6 @@ func NewModel(
 	createInput.Prompt = ""
 
 	m := Model{
-		version:           version,
 		repoPaths:         repoPaths,
 		repoNames:         repoNames,
 		repoConfigs:       repoConfigs,

@@ -42,7 +42,7 @@ func CommandForIssue(command string, issue *linear.Issue) string {
 }
 
 func AttachCommand(contextPath, sessionCommand, launchCommand string) *exec.Cmd {
-	return exec.Command("sh", "-c", AttachShellCommand(contextPath, sessionCommand, launchCommand, false))
+	return exec.Command("sh", "-c", AttachShellCommand(contextPath, sessionCommand, launchCommand, true))
 }
 
 // SessionCommand returns the agent command to run for a context.
@@ -78,24 +78,20 @@ func MarkAttached(contextPath string) {
 }
 
 // AttachShellCommand returns a shell command that attaches to the per-context
-// tmux-backed agent session, creating it if needed.
+// tmux-backed agent session. The session must already exist.
 // When nested is true, the command clears TMUX so the attach happens as a
 // nested client inside the current pane instead of switching the outer client.
 func AttachShellCommand(contextPath, sessionCommand, launchCommand string, nested bool) string {
 	sessionName := sessionNameFor(contextPath, sessionCommand)
-	agentCommand := SessionCommand(contextPath, sessionCommand, launchCommand)
-	escapedPath := strings.ReplaceAll(contextPath, "'", "'\\''")
 	prefix := ""
 	if nested {
-		prefix = "TMUX='' "
+		prefix = "export TMUX=''; "
 	}
 
 	return fmt.Sprintf(
-		`%stmux new-session -A -s '%s' -c '%s' -E 'exec sh -c "%s"' \; set status off \; bind-key -n C-q detach-client`,
+		`%stmux bind-key -n C-q detach-client >/dev/null 2>&1 || true; tmux attach-session -t '%s'`,
 		prefix,
 		sessionName,
-		escapedPath,
-		strings.ReplaceAll(agentCommand, `"`, `\"`),
 	)
 }
 
@@ -114,7 +110,10 @@ func LaunchBackground(contextPath, sessionCommand, launchCommand string) error {
 		"-c", contextPath,
 		"exec "+launchCommand,
 	)
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+	return exec.Command("tmux", "set-option", "-t", sessionName, "status", "off").Run()
 }
 
 // SessionExists returns true if the tmux session for this context+command exists.
