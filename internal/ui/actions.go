@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/adamarutyunov/launch/embed"
 	tea "github.com/charmbracelet/bubbletea"
 	"squirrel/internal/agent"
+	stmux "squirrel/internal/tmux"
 	"squirrel/internal/workspace"
 )
 
@@ -38,13 +38,13 @@ func (m Model) selectContext() Model {
 
 func (m *Model) cleanupContext(repoIdx int, contextPath string) {
 	if m.launchContextPath[repoIdx] == contextPath {
-		if panel, ok := m.launchPanels[repoIdx]; ok {
-			panel.StopAll()
-			delete(m.launchPanels, repoIdx)
-			delete(m.launchContextPath, repoIdx)
-			if !m.hasActiveLaunch() {
-				m.launchFocusIndex = -1
-			}
+		if paneID, ok := m.launchPaneIDs[repoIdx]; ok {
+			_ = stmux.KillPane(paneID)
+			delete(m.launchPaneIDs, repoIdx)
+		}
+		delete(m.launchContextPath, repoIdx)
+		if m.mainPaneID != "" {
+			_ = stmux.ResizePaneWidth(m.mainPaneID, 65, 40)
 		}
 	}
 }
@@ -74,40 +74,51 @@ func (m Model) openLaunchWithForce(force bool) (tea.Model, tea.Cmd) {
 	}
 
 	if m.launchContextPath[repoIdx] == contextPath {
+		if paneID, ok := m.launchPaneIDs[repoIdx]; ok {
+			_ = stmux.SelectPane(paneID)
+		}
+		return m, nil
+	}
+	if _, err := exec.LookPath("launch"); err != nil {
+		m.appendOutput(styleDanger.Render("✗ Launch: executable not found in PATH"))
 		return m, nil
 	}
 
-	if oldPanel, ok := m.launchPanels[repoIdx]; ok {
-		oldPanel.StopAll()
-		delete(m.launchPanels, repoIdx)
-		delete(m.launchContextPath, repoIdx)
+	title := "Launch " + filepath.Base(m.repoPaths[repoIdx])
+	command := shellCommand("launch --force-autostart " + stmux.ShellQuote(contextPath))
+	if paneID, ok := m.launchPaneIDs[repoIdx]; ok {
+		if err := stmux.RespawnPane(paneID, contextPath, title, command); err != nil {
+			m.appendOutput(styleDanger.Render("✗ Launch: " + err.Error()))
+			return m, nil
+		}
+		m.launchContextPath[repoIdx] = contextPath
+		_ = stmux.SelectPane(paneID)
+		return m, nil
 	}
 
-	panel, err := embed.New(contextPath)
+	var paneID string
+	var err error
+	if len(m.launchPaneIDs) == 0 {
+		paneID, err = stmux.SplitPaneHorizontal(m.mainPaneID, contextPath, title, command)
+		if err == nil {
+			_ = stmux.ResizePaneWidth(m.mainPaneID, 50, 40)
+			_ = stmux.ResizePaneWidth(paneID, 25, 25)
+		}
+	} else {
+		paneID, err = stmux.SplitPaneVertical(m.firstLaunchPaneID(), contextPath, title, command)
+		if err == nil {
+			_ = stmux.ResizePaneWidth(m.mainPaneID, 50, 40)
+			_ = stmux.ResizePaneWidth(m.firstLaunchPaneID(), 25, 25)
+		}
+	}
 	if err != nil {
 		m.appendOutput(styleDanger.Render("✗ Launch: " + err.Error()))
 		return m, nil
 	}
-	if !panel.HasProcesses() {
-		m.appendOutput(styleWarning.Render("⚠ No launch.yml found in " + filepath.Base(contextPath)))
-		return m, nil
-	}
-
-	panel.Tag = repoIdx
-	m.launchPanels[repoIdx] = &panel
+	m.launchPaneIDs[repoIdx] = paneID
 	m.launchContextPath[repoIdx] = contextPath
-
-	panelHeight := m.launchPanelHeight()
-	sizedPanel, sizeCmd := m.launchPanels[repoIdx].Update(tea.WindowSizeMsg{
-		Width:  m.launchPanelWidth(),
-		Height: panelHeight,
-	})
-	*m.launchPanels[repoIdx] = sizedPanel
-
-	initCmd := m.launchPanels[repoIdx].Init()
-	m.launchPanels[repoIdx].ForceStartAutoStart()
-
-	return m, tea.Batch(initCmd, sizeCmd)
+	_ = stmux.SelectPane(paneID)
+	return m, nil
 }
 
 func (m Model) closeLaunch() (tea.Model, tea.Cmd) {
@@ -117,15 +128,15 @@ func (m Model) closeLaunch() (tea.Model, tea.Cmd) {
 	r := m.rows[m.cursor]
 	repoIdx := r.repoIdx
 
-	panel, ok := m.launchPanels[repoIdx]
-	if !ok {
+	paneID, ok := m.launchPaneIDs[repoIdx]
+	if m.launchContextPath[repoIdx] == "" || !ok {
 		return m, nil
 	}
-	panel.StopAll()
-	delete(m.launchPanels, repoIdx)
+	_ = stmux.KillPane(paneID)
+	delete(m.launchPaneIDs, repoIdx)
 	delete(m.launchContextPath, repoIdx)
-	if !m.hasActiveLaunch() || m.launchFocusIndex >= len(m.launchPanels) {
-		m.launchFocusIndex = -1
+	if len(m.launchPaneIDs) == 0 {
+		_ = stmux.ResizePaneWidth(m.mainPaneID, 65, 40)
 	}
 	m.appendOutput(styleStatus.Render("✓ Processes stopped"))
 	return m, nil
@@ -205,4 +216,28 @@ func (m Model) attachAgentFullscreenWithForce(force bool) (tea.Model, tea.Cmd) {
 	return m, tea.ExecProcess(agent.AttachCommand(contextPath, command, launchCommand), func(err error) tea.Msg {
 		return agentAttachFinishedMsg{err: err}
 	})
+}
+
+func shellCommand(command string) string {
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/sh"
+	}
+	if strings.TrimSpace(command) == "" {
+		return "exec " + shell
+	}
+	return command + "; exec " + shell
+}
+
+func (m Model) firstLaunchPaneID() string {
+	firstRepoIdx := -1
+	for repoIdx := range m.launchPaneIDs {
+		if firstRepoIdx == -1 || repoIdx < firstRepoIdx {
+			firstRepoIdx = repoIdx
+		}
+	}
+	if firstRepoIdx == -1 {
+		return ""
+	}
+	return m.launchPaneIDs[firstRepoIdx]
 }

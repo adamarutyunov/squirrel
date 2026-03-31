@@ -20,89 +20,13 @@ func (m Model) renderPrompt(ctx workspace.Context) string {
 	return line
 }
 
-func (m Model) launchPanelWidth() int {
-	w := m.width * 15 / 100
-	if w < 30 {
-		w = 30
-	}
-	return w
-}
-
-func (m Model) hasActiveLaunch() bool { return len(m.launchPanels) > 0 }
-
-func (m Model) launchPanelHeight() int {
-	n := len(m.launchPanels)
-	if n == 0 {
-		return 0
-	}
-	return (m.height - (n - 1)) / n
-}
-
-func (m Model) isLaunchFocused() bool { return m.launchFocusIndex >= 0 }
-
-func (m Model) sortedLaunchIndices() []int {
-	indices := make([]int, 0, len(m.launchPanels))
-	for idx := range m.launchPanels {
-		indices = append(indices, idx)
-	}
-	sortInts(indices)
-	return indices
-}
+func (m Model) hasActiveLaunch() bool { return len(m.launchPaneIDs) > 0 }
 
 func (m Model) View() string {
 	if m.width == 0 {
 		return ""
 	}
-
-	if !m.hasActiveLaunch() {
-		return m.renderLeft(m.width)
-	}
-
-	launchW := m.launchPanelWidth()
-	leftW := m.width - launchW - 1
-
-	leftContent := lipgloss.NewStyle().Width(leftW).MaxWidth(leftW).Render(m.renderLeft(leftW))
-	leftLines := strings.Split(leftContent, "\n")
-
-	sorted := m.sortedLaunchIndices()
-	panelH := m.launchPanelHeight()
-	rightW := launchW
-	var rightLines []string
-	for panelIndex, repoIdx := range sorted {
-		if panelIndex > 0 {
-			rightLines = append(rightLines, styleDim.Render(strings.Repeat("─", rightW)))
-		}
-		panel := m.launchPanels[repoIdx]
-		panelLines := strings.Split(panel.View(), "\n")
-		for len(panelLines) < panelH {
-			panelLines = append(panelLines, "")
-		}
-		rightLines = append(rightLines, panelLines[:panelH]...)
-	}
-
-	for len(leftLines) < m.height {
-		leftLines = append(leftLines, "")
-	}
-	for len(rightLines) < m.height {
-		rightLines = append(rightLines, "")
-	}
-
-	sep := styleDim.Render("│")
-	var result []string
-	for i := 0; i < m.height; i++ {
-		left := padToWidth(leftLines[i], leftW)
-		right := padToWidth(rightLines[i], rightW)
-		result = append(result, left+sep+right)
-	}
-	return strings.Join(result, "\n")
-}
-
-func padToWidth(line string, width int) string {
-	visible := lipgloss.Width(line)
-	if visible < width {
-		return line + strings.Repeat(" ", width-visible)
-	}
-	return line
+	return m.renderLeft(m.width)
 }
 
 func (m Model) renderLeft(w int) string {
@@ -219,11 +143,7 @@ func (m Model) renderFooter(w int) string {
 		return strings.Join(lines, "\n")
 
 	default:
-		launchHint := ""
-		if m.isLaunchFocused() {
-			launchHint = "  " + styleStatus.Render("● Launch") + styleDim.Render("  tab: Next")
-		}
-		return styleDim.Render("  ↑↓/jk: Nav  enter: Select  n: New  d: Del  c: Copy  a: Agent  l: Launch  L: Kill  s: Sort("+m.sortModeLabel()+")  tab: Cycle  ctrl+w: Terminal  q: Quit") + launchHint
+		return styleDim.Render("  ↑↓/jk: Nav  enter: Select  n: New  d: Del  c: Copy  a: Agent  l: Launch  L: Kill  s: Sort(" + m.sortModeLabel() + ")  ctrl+w: Pane  q: Quit")
 	}
 }
 
@@ -322,7 +242,7 @@ func (m Model) renderContext(r row, selected bool, w int) string {
 func (m Model) renderContextRow(ctx workspace.Context, namePadded, branchPadded, installStr, dirtyStr, launchStr, timeStr string, hasLinear bool, linearColW, w int, isCursor, isActive bool) string {
 	base := lipgloss.NewStyle()
 	if isCursor {
-		base = base.Background(colorSelection)
+		base = base.Background(colorSelectionActive)
 	}
 
 	activePrefix := "  "

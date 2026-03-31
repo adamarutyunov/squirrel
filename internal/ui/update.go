@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/adamarutyunov/launch/embed"
 	tea "github.com/charmbracelet/bubbletea"
 	"squirrel/internal/agent"
 	"squirrel/internal/linear"
+	stmux "squirrel/internal/tmux"
 	"squirrel/internal/workspace"
 )
 
@@ -17,25 +17,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		var cmds []tea.Cmd
-		if m.companionPaneID != "" {
-			cmds = append(cmds, resizePaneWidthCmd(m.companionPaneID, 35, 30))
-		}
-		if m.hasActiveLaunch() {
-			panelHeight := m.launchPanelHeight()
-			for _, panel := range m.launchPanels {
-				newPanel, cmd := panel.Update(tea.WindowSizeMsg{
-					Width:  m.launchPanelWidth(),
-					Height: panelHeight,
-				})
-				*panel = newPanel
-				cmds = append(cmds, cmd)
-			}
-			return m, tea.Batch(cmds...)
+		if m.mainPaneID != "" && (m.companionPaneID != "" || m.hasActiveLaunch()) {
+			cmds = append(cmds, applyManagedLayoutCmd(m.mainPaneID, m.firstLaunchPaneID()))
 		}
 		return m, tea.Batch(cmds...)
 
 	case tickMsg:
 		m.spinnerFrame++
+		m.pruneClosedLaunchPanes()
 		cmds := []tea.Cmd{tickCmd()}
 		if m.spinnerFrame%4 == 0 {
 			for i, path := range m.repoPaths {
@@ -46,14 +35,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case refreshMsg:
 		m.applyRefresh(msg)
-		return m, nil
-
-	case embed.EventMsg:
-		if panel, ok := m.launchPanels[msg.Tag]; ok {
-			newPanel, cmd := panel.Update(msg)
-			*panel = newPanel
-			return m, cmd
-		}
 		return m, nil
 
 	case createContextResultMsg:
@@ -165,37 +146,29 @@ func (m Model) handleDeleteContextResult(msg deleteContextResultMsg) (tea.Model,
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Type == tea.KeyCtrlC {
-		return m, tea.Quit
+		return m, nil
 	}
 
 	if m.prompt != nil {
 		return m.handlePromptKey(msg)
 	}
 
-	if msg.Type == tea.KeyTab {
-		if m.hasActiveLaunch() {
-			sorted := m.sortedLaunchIndices()
-			m.launchFocusIndex++
-			if m.launchFocusIndex >= len(sorted) {
-				m.launchFocusIndex = -1
-			}
-		}
-		return m, nil
-	}
-
-	if m.isLaunchFocused() {
-		sorted := m.sortedLaunchIndices()
-		if m.launchFocusIndex < len(sorted) {
-			repoIdx := sorted[m.launchFocusIndex]
-			if panel, ok := m.launchPanels[repoIdx]; ok {
-				newPanel, cmd := panel.Update(msg)
-				*panel = newPanel
-				return m, cmd
-			}
-		}
-	}
-
 	return m.handleListKey(msg)
+}
+
+func (m *Model) pruneClosedLaunchPanes() {
+	removed := false
+	for repoIdx, paneID := range m.launchPaneIDs {
+		if paneID == "" || stmux.PaneExists(paneID) {
+			continue
+		}
+		delete(m.launchPaneIDs, repoIdx)
+		delete(m.launchContextPath, repoIdx)
+		removed = true
+	}
+	if removed && m.mainPaneID != "" {
+		_ = stmux.ResizePaneWidth(m.mainPaneID, 65, 40)
+	}
 }
 
 func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

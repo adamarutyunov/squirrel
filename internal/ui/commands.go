@@ -111,12 +111,21 @@ func launchAgentBackgroundCmd(contextPath, sessionCommand, launchCommand string)
 	}
 }
 
-func resizePaneWidthCmd(paneID string, percent, minWidth int) tea.Cmd {
+func applyManagedLayoutCmd(mainPaneID, launchPaneID string) tea.Cmd {
 	return func() tea.Msg {
-		if strings.TrimSpace(paneID) == "" {
+		if strings.TrimSpace(mainPaneID) == "" {
 			return nil
 		}
-		if err := tmux.ResizePaneWidth(paneID, percent, minWidth); err != nil {
+		if strings.TrimSpace(launchPaneID) == "" {
+			if err := tmux.ResizePaneWidth(mainPaneID, 65, 40); err != nil {
+				return nil
+			}
+			return nil
+		}
+		if err := tmux.ResizePaneWidth(mainPaneID, 50, 40); err != nil {
+			return nil
+		}
+		if err := tmux.ResizePaneWidth(launchPaneID, 25, 25); err != nil {
 			return nil
 		}
 		return nil

@@ -12,7 +12,6 @@ import (
 	"squirrel/internal/agent"
 	"squirrel/internal/git"
 	"squirrel/internal/linear"
-	"squirrel/internal/tmux"
 	"squirrel/internal/ui"
 	"squirrel/internal/workspace"
 )
@@ -43,6 +42,7 @@ func main() {
 		launchInTmux()
 		return
 	}
+	mainPaneID := os.Getenv("TMUX_PANE")
 
 	dir, err := os.Getwd()
 	if err != nil {
@@ -51,8 +51,9 @@ func main() {
 	}
 
 	// Create companion shell pane on the right.
-	companionPaneID := createCompanionPane(dir)
+	companionPaneID := createCompanionPane(mainPaneID, dir)
 	if companionPaneID != "" {
+		exec.Command("tmux", "select-pane", "-t", mainPaneID, "-T", "Squirrel").Run()
 		defer func() {
 			exec.Command("tmux", "kill-pane", "-t", companionPaneID).Run()
 			exec.Command("tmux", "unbind-key", "-n", "C-w").Run()
@@ -129,10 +130,14 @@ func main() {
 		fmt.Fprintln(os.Stderr, "warning: user config:", err)
 	}
 
-	model := ui.NewModel(repoPaths, repoContexts, repoConfigs, repoLinearIssues, repoLinearAPIKeys, userConfig.AgentCommand, userConfig.SortMode, companionPaneID, Version)
+	model := ui.NewModel(repoPaths, repoContexts, repoConfigs, repoLinearIssues, repoLinearAPIKeys, userConfig.AgentCommand, userConfig.SortMode, mainPaneID, companionPaneID, Version)
 	program := tea.NewProgram(model, tea.WithAltScreen())
 
-	if _, err := program.Run(); err != nil {
+	finalModel, err := program.Run()
+	if typed, ok := finalModel.(ui.Model); ok {
+		typed.CleanupLaunchPanes()
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
@@ -152,7 +157,7 @@ func launchInTmux() {
 		os.Exit(1)
 	}
 	cmd := exec.Command("sh", "-c", fmt.Sprintf(
-		`tmux new-session '%s' \; set mouse on \; set status off \; set pane-border-style 'fg=#71717a' \; set pane-active-border-style 'fg=#71717a'`,
+		`tmux new-session '%s' \; set mouse on \; set status off \; set pane-border-status top \; set pane-border-format '#{?pane_active,#[bold fg=#f59e0b],#[fg=#71717a]} #{pane_title} ' \; set pane-border-style 'fg=#71717a' \; set pane-active-border-style 'fg=#f59e0b'`,
 		exePath,
 	))
 	cmd.Stdin = os.Stdin
@@ -163,17 +168,17 @@ func launchInTmux() {
 	}
 }
 
-func createCompanionPane(dir string) string {
+func createCompanionPane(mainPaneID, dir string) string {
 	shell := os.Getenv("SHELL")
 	if shell == "" {
 		shell = "/bin/sh"
 	}
-	output, err := exec.Command("tmux", "split-window", "-h", "-d", "-l", "35%", "-c", dir, "-P", "-F", "#{pane_id}", shell).Output()
+	output, err := exec.Command("tmux", "split-window", "-h", "-d", "-t", mainPaneID, "-l", "35%", "-c", dir, "-P", "-F", "#{pane_id}", shell).Output()
 	if err != nil {
 		return ""
 	}
 	paneID := strings.TrimSpace(string(output))
-	_ = tmux.ResizePaneWidth(paneID, 35, 30)
+	_ = exec.Command("tmux", "select-pane", "-t", paneID, "-T", "Agent").Run()
 
 	// Bind Ctrl+W to toggle between panes (works from either pane).
 	exec.Command("tmux", "bind-key", "-n", "C-w", "select-pane", "-t", ":.+").Run()

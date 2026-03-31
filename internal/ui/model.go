@@ -1,9 +1,9 @@
 package ui
 
 import (
+	"os/exec"
 	"path/filepath"
 
-	"github.com/adamarutyunov/launch/embed"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -12,13 +12,14 @@ import (
 )
 
 var (
-	colorGreen     = lipgloss.Color("#22c55e")
-	colorBlue      = lipgloss.Color("#60a5fa")
-	colorDim       = lipgloss.Color("#71717a")
-	colorWhite     = lipgloss.Color("#f4f4f5")
-	colorSelection = lipgloss.Color("#3f3f46")
-	colorAmber     = lipgloss.Color("#f59e0b")
-	colorRed       = lipgloss.Color("#ef4444")
+	colorGreen           = lipgloss.Color("#22c55e")
+	colorBlue            = lipgloss.Color("#60a5fa")
+	colorDim             = lipgloss.Color("#71717a")
+	colorWhite           = lipgloss.Color("#f4f4f5")
+	colorSelection       = lipgloss.Color("#3f3f46")
+	colorSelectionActive = lipgloss.Color("#52525b")
+	colorAmber           = lipgloss.Color("#f59e0b")
+	colorRed             = lipgloss.Color("#ef4444")
 
 	styleTitle     = lipgloss.NewStyle().Bold(true).Foreground(colorWhite)
 	styleDim       = lipgloss.NewStyle().Foreground(colorDim)
@@ -127,13 +128,13 @@ type Model struct {
 	// Status messages shown above the footer.
 	outputLines []string
 
+	mainPaneID string
 	// Companion tmux pane (real terminal on the right).
 	companionPaneID string
 
-	// Right panel: launch panels, one per project (keyed by repoIdx).
-	launchPanels      map[int]*embed.Model
+	// Launch panes, one per project (keyed by repoIdx).
+	launchPaneIDs     map[int]string
 	launchContextPath map[int]string // repoIdx → context path the panel was opened from
-	launchFocusIndex  int            // -1 = main window, 0+ = index into sorted active repo indices
 
 	// Spinner animation frame counter (incremented every tick).
 	spinnerFrame int
@@ -152,6 +153,7 @@ func NewModel(
 	repoLinearAPIKeys []string,
 	agentCommand string,
 	initialSortMode string,
+	mainPaneID string,
 	companionPaneID string,
 	version string,
 ) Model {
@@ -187,10 +189,10 @@ func NewModel(
 		repoLinearIssues:  repoLinearIssues,
 		repoLinearAPIKeys: repoLinearAPIKeys,
 		agentCommand:      agentCommand,
+		mainPaneID:        mainPaneID,
 		companionPaneID:   companionPaneID,
-		launchPanels:      make(map[int]*embed.Model),
+		launchPaneIDs:     make(map[int]string),
 		launchContextPath: make(map[int]string),
-		launchFocusIndex:  -1,
 		pickerRepoIdx:     -1,
 		pickerCursor:      -1,
 		filter:            filterInput,
@@ -203,4 +205,13 @@ func NewModel(
 
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(textinput.Blink, tickCmd())
+}
+
+func (m Model) CleanupLaunchPanes() {
+	for _, paneID := range m.launchPaneIDs {
+		if paneID == "" {
+			continue
+		}
+		_ = exec.Command("tmux", "kill-pane", "-t", paneID).Run()
+	}
 }
