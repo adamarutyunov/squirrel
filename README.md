@@ -28,6 +28,12 @@ Squirrel gives you a single terminal UI to manage contexts, run agents in them, 
 go install squirrel@latest
 ```
 
+Or use the install script:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/adamarutyunov/squirrel/main/install.sh | sh
+```
+
 Or build from source:
 
 ```sh

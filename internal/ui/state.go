@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"squirrel/internal/linear"
+	"squirrel/internal/workspace"
 )
 
 func (m *Model) rebuild() {
@@ -121,6 +122,9 @@ func (m *Model) ensureVisible() {
 }
 
 func (m Model) footerLineCount() int {
+	if m.prompt != nil {
+		return 3
+	}
 	if m.mode == modeCreating {
 		if m.pickerLoading {
 			return 2
@@ -193,13 +197,18 @@ func (m *Model) cycleSortMode() {
 	case sortModeAgent:
 		m.sortMode = sortModeAlphabetical
 	case sortModeAlphabetical:
-		m.sortMode = sortModeLinear
-	case sortModeLinear:
+		m.sortMode = sortModeLinearID
+	case sortModeLinearID:
+		m.sortMode = sortModeLinearStatus
+	case sortModeLinearStatus:
 		m.sortMode = sortModeUpdated
 	default:
 		m.sortMode = sortModeAgent
 	}
 	m.rebuild()
+	if err := saveSortMode(m.sortMode); err != nil {
+		m.appendOutput(styleWarning.Render("⚠ Failed to save sort mode: " + err.Error()))
+	}
 }
 
 func (m *Model) applyRefresh(msg refreshMsg) {
@@ -234,6 +243,7 @@ func (m *Model) resetCreateState() {
 	m.createInput.Blur()
 	m.filter.Focus()
 	m.pickerIssues = nil
+	m.pickerRepoIdx = -1
 	m.pickerCursor = -1
 	m.pickerScroll = 0
 	m.pickerLoading = false
@@ -252,4 +262,13 @@ func (m Model) renderPromptPath(path string) string {
 		}
 	}
 	return strings.Join(parts, "/")
+}
+
+func saveSortMode(mode sortMode) error {
+	cfg, err := workspace.LoadUserConfig()
+	if err != nil {
+		return err
+	}
+	cfg.SortMode = mode.configValue()
+	return workspace.SaveUserConfig(cfg)
 }

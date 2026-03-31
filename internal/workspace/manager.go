@@ -27,6 +27,7 @@ type Context struct {
 	HeadTime    time.Time
 	LinearIssue *linear.Issue
 	AgentStatus string
+	SetupStatus string
 }
 
 // ListContexts returns all contexts for the repository at repoPath.
@@ -54,6 +55,10 @@ func ListContexts(repoPath string, linearIssues map[string]linear.Issue, resetTh
 		status, err := agent.ReadStatus(wt.Path)
 		if err == nil {
 			ctx.AgentStatus = status.State
+		}
+		setupStatus, err := ReadSetupStatus(wt.Path)
+		if err == nil {
+			ctx.SetupStatus = setupStatus.State
 		}
 		// On first load, reset stale thinking states to idle.
 		// Running agents will update back to thinking via hooks.
@@ -170,6 +175,9 @@ func DeleteContext(ctx Context, force bool) error {
 		return err
 	}
 	if err := agent.RemoveStatus(ctx.Path); err != nil {
+		return err
+	}
+	if err := ClearSetupStatus(ctx.Path); err != nil {
 		return err
 	}
 	// Remove saved session ID so --resume doesn't try to resume a deleted context.

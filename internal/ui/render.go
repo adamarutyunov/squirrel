@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"squirrel/internal/agent"
+	"squirrel/internal/linear"
 	"squirrel/internal/workspace"
 )
 
@@ -176,6 +177,15 @@ func (m Model) renderLeft(w int) string {
 }
 
 func (m Model) renderFooter(w int) string {
+	if m.prompt != nil {
+		lines := []string{
+			"  " + styleWarning.Bold(true).Render(m.prompt.title),
+			"  " + styleDim.Render(m.prompt.message),
+			"  " + styleDim.Render(m.prompt.confirmText+"  "+m.prompt.cancelText),
+		}
+		return strings.Join(lines, "\n")
+	}
+
 	switch m.mode {
 	case modeCreating:
 		inputLine := "  " + styleDim.Render("New Context: ") + m.createInput.View() +
@@ -237,10 +247,11 @@ func (m Model) renderContext(r row, selected bool, w int) string {
 	ctx := item.context
 
 	const prefixWidth = 4
+	const installWidth = 3
 	const dirtyWidth = 2
 	const launchWidth = 2
 	const timeWidth = 8
-	rightWidth := dirtyWidth + launchWidth + timeWidth
+	rightWidth := installWidth + dirtyWidth + launchWidth + timeWidth
 
 	middleWidth := w - prefixWidth - rightWidth
 	if middleWidth < 10 {
@@ -295,16 +306,20 @@ func (m Model) renderContext(r row, selected bool, w int) string {
 	if ctx.IsDirty {
 		dirtyStr = "● "
 	}
+	installStr := "   "
+	if ctx.SetupStatus == workspace.SetupStatusRunning {
+		installStr = "🛠 "
+	}
 	launchStr := "  "
 	if m.launchContextPath[r.repoIdx] == ctx.Path {
 		launchStr = "▶ "
 	}
 
 	isActive := m.selectedContextPath != "" && ctx.Path == m.selectedContextPath
-	return m.renderContextRow(ctx, namePadded, branchPadded, dirtyStr, launchStr, timeStr, hasLinear, linearColW, w, selected, isActive)
+	return m.renderContextRow(ctx, namePadded, branchPadded, installStr, dirtyStr, launchStr, timeStr, hasLinear, linearColW, w, selected, isActive)
 }
 
-func (m Model) renderContextRow(ctx workspace.Context, namePadded, branchPadded, dirtyStr, launchStr, timeStr string, hasLinear bool, linearColW, w int, isCursor, isActive bool) string {
+func (m Model) renderContextRow(ctx workspace.Context, namePadded, branchPadded, installStr, dirtyStr, launchStr, timeStr string, hasLinear bool, linearColW, w int, isCursor, isActive bool) string {
 	base := lipgloss.NewStyle()
 	if isCursor {
 		base = base.Background(colorSelection)
@@ -317,15 +332,19 @@ func (m Model) renderContextRow(ctx workspace.Context, namePadded, branchPadded,
 
 	statusPrefix := "  "
 	statusStyle := base.Foreground(colorDim)
-	switch ctx.AgentStatus {
-	case agent.StatusThinking:
+	switch {
+	case ctx.SetupStatus == workspace.SetupStatusRunning:
 		spinnerFrames := []string{"◐ ", "◓ ", "◑ ", "◒ "}
 		statusPrefix = spinnerFrames[m.spinnerFrame%len(spinnerFrames)]
 		statusStyle = base.Foreground(colorAmber)
-	case agent.StatusDone:
+	case ctx.AgentStatus == agent.StatusThinking:
+		spinnerFrames := []string{"◐ ", "◓ ", "◑ ", "◒ "}
+		statusPrefix = spinnerFrames[m.spinnerFrame%len(spinnerFrames)]
+		statusStyle = base.Foreground(colorAmber)
+	case ctx.AgentStatus == agent.StatusDone:
 		statusPrefix = "● "
 		statusStyle = base.Foreground(colorBlue)
-	case agent.StatusIdle:
+	case ctx.AgentStatus == agent.StatusIdle:
 		statusPrefix = "○ "
 		statusStyle = base.Foreground(colorDim)
 	}
@@ -349,6 +368,7 @@ func (m Model) renderContextRow(ctx workspace.Context, namePadded, branchPadded,
 	} else {
 		dirtyStyled = base.Foreground(colorDim).Render(dirtyStr)
 	}
+	installStyled := base.Foreground(colorAmber).Render(installStr)
 
 	var launchStyled string
 	if launchStr == "▶ " {
@@ -360,18 +380,7 @@ func (m Model) renderContextRow(ctx workspace.Context, namePadded, branchPadded,
 
 	var linearStyled string
 	if hasLinear {
-		linearRaw := ctx.LinearIssue.Identifier + " " + ctx.LinearIssue.Title
-		linearRunes := []rune(linearRaw)
-		if len(linearRunes) > linearColW {
-			linearRunes = append(linearRunes[:linearColW-1], '…')
-		}
-		linearPadded := string(linearRunes) + strings.Repeat(" ", max(0, linearColW-len(linearRunes)))
-		if spaceIdx := strings.Index(linearPadded, " "); spaceIdx > 0 {
-			linearStyled = base.Foreground(colorBlue).Bold(true).Render(linearPadded[:spaceIdx]) +
-				base.Foreground(colorWhite).Render(linearPadded[spaceIdx:])
-		} else {
-			linearStyled = base.Foreground(colorBlue).Bold(true).Render(linearPadded)
-		}
+		linearStyled = renderLinearIssue(base, *ctx.LinearIssue, linearColW)
 	}
 
 	var branchStyled string
@@ -382,13 +391,13 @@ func (m Model) renderContextRow(ctx workspace.Context, namePadded, branchPadded,
 	var line string
 	switch {
 	case branchPadded != "" && hasLinear:
-		line = prefixStyled + nameStyled + branchStyled + base.Render("  ") + linearStyled + dirtyStyled + launchStyled + timeStyled
+		line = prefixStyled + nameStyled + branchStyled + base.Render("  ") + linearStyled + installStyled + dirtyStyled + launchStyled + timeStyled
 	case branchPadded != "":
-		line = prefixStyled + nameStyled + branchStyled + dirtyStyled + launchStyled + timeStyled
+		line = prefixStyled + nameStyled + branchStyled + installStyled + dirtyStyled + launchStyled + timeStyled
 	case hasLinear:
-		line = prefixStyled + nameStyled + base.Render("  ") + linearStyled + dirtyStyled + launchStyled + timeStyled
+		line = prefixStyled + nameStyled + base.Render("  ") + linearStyled + installStyled + dirtyStyled + launchStyled + timeStyled
 	default:
-		line = prefixStyled + nameStyled + dirtyStyled + launchStyled + timeStyled
+		line = prefixStyled + nameStyled + installStyled + dirtyStyled + launchStyled + timeStyled
 	}
 
 	if isCursor {
@@ -417,6 +426,84 @@ func relativeTime(t time.Time) string {
 	default:
 		return t.Format("Jan 2")
 	}
+}
+
+func renderLinearIssue(base lipgloss.Style, issue linear.Issue, width int) string {
+	if width <= 0 {
+		return ""
+	}
+
+	idPart := issue.Identifier
+	textWidth := max(0, width-len([]rune(idPart)))
+	if textWidth == 0 {
+		return linearIDStyle(base, issue).Render(truncateRunes(idPart, width))
+	}
+
+	titlePart := " " + issue.Title
+	titlePart = truncateRunes(titlePart, textWidth)
+	padding := strings.Repeat(" ", max(0, textWidth-len([]rune(titlePart))))
+
+	return linearIDStyle(base, issue).Render(idPart) +
+		linearTextStyle(base, issue).Render(titlePart) +
+		base.Render(padding)
+}
+
+func linearIDStyle(base lipgloss.Style, issue linear.Issue) lipgloss.Style {
+	style := base.Bold(true)
+
+	switch issue.State.Type {
+	case "backlog", "canceled":
+		return style.Foreground(colorDim).Strikethrough(issue.State.Type == "canceled")
+	case "unstarted":
+		return style.Foreground(linearStatusColor(issue.State.Color, colorBlue))
+	case "started":
+		return style.Foreground(linearStatusColor(issue.State.Color, colorBlue))
+	case "completed":
+		return style.Foreground(linearStatusColor(issue.State.Color, colorBlue))
+	case "triage":
+		return style.Foreground(colorAmber)
+	default:
+		return style.Foreground(colorBlue)
+	}
+}
+
+func linearTextStyle(base lipgloss.Style, issue linear.Issue) lipgloss.Style {
+	style := base
+
+	switch issue.State.Type {
+	case "backlog":
+		return style.Foreground(colorDim)
+	case "unstarted":
+		return style.Foreground(colorWhite)
+	case "started":
+		return style.Foreground(colorWhite)
+	case "completed":
+		return style.Foreground(colorDim).Strikethrough(true)
+	case "canceled":
+		return style.Foreground(colorDim).Strikethrough(true)
+	case "triage":
+		return style.Foreground(colorWhite)
+	default:
+		return style.Foreground(colorWhite)
+	}
+}
+
+func linearStatusColor(value string, fallback lipgloss.TerminalColor) lipgloss.TerminalColor {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return lipgloss.Color(value)
+}
+
+func truncateRunes(value string, width int) string {
+	runes := []rune(value)
+	if len(runes) <= width {
+		return value
+	}
+	if width <= 1 {
+		return string(runes[:width])
+	}
+	return string(append(runes[:width-1], '…'))
 }
 
 func sortInts(values []int) {

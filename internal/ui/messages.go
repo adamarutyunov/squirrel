@@ -22,8 +22,10 @@ type createContextResultMsg struct {
 }
 
 type setupCommandResultMsg struct {
-	output string
-	err    error
+	repoIdx      int
+	worktreePath string
+	output       string
+	err          error
 }
 
 type deleteContextResultMsg struct {
@@ -38,8 +40,9 @@ type clipboardMsg struct {
 }
 
 type linearIssuesLoadedMsg struct {
-	issues []linear.Issue
-	err    error
+	repoIdx int
+	issues  []linear.Issue
+	err     error
 }
 
 type agentAttachFinishedMsg struct {

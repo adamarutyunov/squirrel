@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"bytes"
 	"os/exec"
 	"strings"
 	"time"
@@ -9,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"squirrel/internal/agent"
 	"squirrel/internal/linear"
+	"squirrel/internal/tmux"
 	"squirrel/internal/workspace"
 )
 
@@ -33,7 +35,7 @@ func createContextCmd(repoIdx int, repoPath, contextName string, cfg workspace.C
 	}
 }
 
-func setupCommandCmd(worktreePath, command string) tea.Cmd {
+func setupCommandCmd(repoIdx int, worktreePath, command string) tea.Cmd {
 	return func() tea.Msg {
 		if strings.TrimSpace(command) == "" {
 			return setupCommandResultMsg{}
@@ -41,8 +43,41 @@ func setupCommandCmd(worktreePath, command string) tea.Cmd {
 
 		cmd := exec.Command("sh", "-lc", command)
 		cmd.Dir = worktreePath
-		output, err := cmd.CombinedOutput()
-		return setupCommandResultMsg{output: strings.TrimSpace(string(output)), err: err}
+		var output bytes.Buffer
+		cmd.Stdout = &output
+		cmd.Stderr = &output
+
+		if err := cmd.Start(); err != nil {
+			_ = workspace.ClearSetupStatus(worktreePath)
+			return setupCommandResultMsg{
+				repoIdx:      repoIdx,
+				worktreePath: worktreePath,
+				err:          err,
+			}
+		}
+		if err := workspace.WriteSetupStatus(worktreePath, workspace.SetupStatusRunning, cmd.Process.Pid); err != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			_ = workspace.ClearSetupStatus(worktreePath)
+			return setupCommandResultMsg{
+				repoIdx:      repoIdx,
+				worktreePath: worktreePath,
+				err:          err,
+			}
+		}
+
+		err := cmd.Wait()
+		clearErr := workspace.ClearSetupStatus(worktreePath)
+		if err == nil && clearErr != nil {
+			err = clearErr
+		}
+
+		return setupCommandResultMsg{
+			repoIdx:      repoIdx,
+			worktreePath: worktreePath,
+			output:       strings.TrimSpace(output.String()),
+			err:          err,
+		}
 	}
 }
 
@@ -61,17 +96,29 @@ func copyToClipboardCmd(path string) tea.Cmd {
 	}
 }
 
-func fetchLinearIssuesCmd(apiKey string) tea.Cmd {
+func fetchLinearIssuesCmd(repoIdx int, apiKey string) tea.Cmd {
 	return func() tea.Msg {
 		client := linear.NewClient(apiKey)
 		issues, err := client.FetchAssignedIssues()
-		return linearIssuesLoadedMsg{issues: issues, err: err}
+		return linearIssuesLoadedMsg{repoIdx: repoIdx, issues: issues, err: err}
 	}
 }
 
-func launchAgentBackgroundCmd(contextPath, command string) tea.Cmd {
+func launchAgentBackgroundCmd(contextPath, sessionCommand, launchCommand string) tea.Cmd {
 	return func() tea.Msg {
-		err := agent.LaunchBackground(contextPath, command)
+		err := agent.LaunchBackground(contextPath, sessionCommand, launchCommand)
 		return agentLaunchBackgroundMsg{err: err}
+	}
+}
+
+func resizePaneWidthCmd(paneID string, percent, minWidth int) tea.Cmd {
+	return func() tea.Msg {
+		if strings.TrimSpace(paneID) == "" {
+			return nil
+		}
+		if err := tmux.ResizePaneWidth(paneID, percent, minWidth); err != nil {
+			return nil
+		}
+		return nil
 	}
 }

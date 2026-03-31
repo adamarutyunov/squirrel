@@ -13,12 +13,44 @@ func (m Model) sortModeLabel() string {
 	switch m.sortMode {
 	case sortModeAlphabetical:
 		return "Alpha"
-	case sortModeLinear:
-		return "Linear"
+	case sortModeLinearID:
+		return "Linear (ID)"
+	case sortModeLinearStatus:
+		return "Linear (Status)"
 	case sortModeUpdated:
 		return "Updated"
 	default:
 		return "Agent"
+	}
+}
+
+func (m sortMode) configValue() string {
+	switch m {
+	case sortModeAlphabetical:
+		return "alpha"
+	case sortModeLinearID:
+		return "linear_id"
+	case sortModeLinearStatus:
+		return "linear_status"
+	case sortModeUpdated:
+		return "updated"
+	default:
+		return "agent"
+	}
+}
+
+func parseSortMode(value string) sortMode {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case "alpha", "alphabetical":
+		return sortModeAlphabetical
+	case "linear_id", "linear-id", "linear":
+		return sortModeLinearID
+	case "linear_status", "linear-status":
+		return sortModeLinearStatus
+	case "updated":
+		return sortModeUpdated
+	default:
+		return sortModeAgent
 	}
 }
 
@@ -30,8 +62,10 @@ func (m Model) sortItems(items []contextItem) {
 		switch m.sortMode {
 		case sortModeAlphabetical:
 			return strings.ToLower(leftContext.Name) < strings.ToLower(rightContext.Name)
-		case sortModeLinear:
-			return compareLinearContexts(leftContext, rightContext)
+		case sortModeLinearID:
+			return compareLinearIDContexts(leftContext, rightContext)
+		case sortModeLinearStatus:
+			return compareLinearStatusContexts(leftContext, rightContext)
 		case sortModeUpdated:
 			return compareUpdatedContexts(leftContext, rightContext)
 		default:
@@ -56,7 +90,7 @@ func compareUpdatedContexts(leftContext, rightContext workspace.Context) bool {
 	return strings.ToLower(leftContext.Name) < strings.ToLower(rightContext.Name)
 }
 
-func compareLinearContexts(leftContext, rightContext workspace.Context) bool {
+func compareLinearIDContexts(leftContext, rightContext workspace.Context) bool {
 	leftTeam, leftNumber, leftHasIssue := linearSortKey(leftContext)
 	rightTeam, rightNumber, rightHasIssue := linearSortKey(rightContext)
 	if leftHasIssue != rightHasIssue {
@@ -69,6 +103,21 @@ func compareLinearContexts(leftContext, rightContext workspace.Context) bool {
 		return leftNumber < rightNumber
 	}
 	return strings.ToLower(leftContext.Name) < strings.ToLower(rightContext.Name)
+}
+
+func compareLinearStatusContexts(leftContext, rightContext workspace.Context) bool {
+	leftBucket, leftPos, leftHasIssue := linearStatusSortKey(leftContext)
+	rightBucket, rightPos, rightHasIssue := linearStatusSortKey(rightContext)
+	if leftHasIssue != rightHasIssue {
+		return leftHasIssue
+	}
+	if leftBucket != rightBucket {
+		return leftBucket < rightBucket
+	}
+	if leftPos != rightPos {
+		return leftPos < rightPos
+	}
+	return compareLinearIDContexts(leftContext, rightContext)
 }
 
 func linearSortKey(context workspace.Context) (string, int, bool) {
@@ -84,6 +133,30 @@ func linearSortKey(context workspace.Context) (string, int, bool) {
 		number = 0
 	}
 	return strings.ToLower(parts[0]), number, true
+}
+
+func linearStatusSortKey(context workspace.Context) (int, float64, bool) {
+	if context.LinearIssue == nil {
+		return 0, 0, false
+	}
+	return linearStatusBucket(context.LinearIssue.State.Type), context.LinearIssue.State.Position, true
+}
+
+func linearStatusBucket(stateType string) int {
+	switch stateType {
+	case "triage", "backlog":
+		return 0
+	case "unstarted":
+		return 1
+	case "started":
+		return 2
+	case "completed":
+		return 3
+	case "canceled":
+		return 4
+	default:
+		return 5
+	}
 }
 
 func agentStatusRank(status string) int {

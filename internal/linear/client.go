@@ -17,8 +17,16 @@ const apiEndpoint = "https://api.linear.app/graphql"
 type Issue struct {
 	Identifier string
 	Title      string
-	State      string
 	BranchName string // e.g. "eng-123-fix-auth-bug"; use as the git branch name
+	State      WorkflowState
+}
+
+type WorkflowState struct {
+	ID       string
+	Name     string
+	Type     string
+	Color    string
+	Position float64
 }
 
 type Client struct {
@@ -48,16 +56,22 @@ type graphQLResponse[T any] struct {
 }
 
 type issueNode struct {
-	Identifier string `json:"identifier"`
-	Title      string `json:"title"`
-	BranchName string `json:"branchName"`
-	State      struct {
-		Name string `json:"name"`
-	} `json:"state"`
+	Identifier string         `json:"identifier"`
+	Title      string         `json:"title"`
+	BranchName string         `json:"branchName"`
+	State      issueStateNode `json:"state"`
 }
 
 type issueConnection struct {
 	Nodes []issueNode `json:"nodes"`
+}
+
+type issueStateNode struct {
+	ID       string  `json:"id"`
+	Name     string  `json:"name"`
+	Type     string  `json:"type"`
+	Color    string  `json:"color"`
+	Position float64 `json:"position"`
 }
 
 // FetchIssues retrieves Linear issues by their human-readable identifiers (e.g. ["ENG-123"]).
@@ -87,7 +101,7 @@ func (c *Client) FetchIssues(identifiers []string) (map[string]Issue, error) {
 	qb.WriteString("{")
 	for i, e := range entries {
 		qb.WriteString(fmt.Sprintf(
-			` a%d: issues(first:1, filter:{team:{key:{eq:%q}},number:{eq:%d}}) { nodes { identifier title branchName state { name } } }`,
+			` a%d: issues(first:1, filter:{team:{key:{eq:%q}},number:{eq:%d}}) { nodes { identifier title branchName state { id name type color position } } }`,
 			i, e.teamKey, e.number,
 		))
 	}
@@ -130,7 +144,7 @@ func (c *Client) FetchAssignedIssues() ([]Issue, error) {
 					identifier
 					title
 					branchName
-					state { name }
+					state { id name type color position }
 				}
 			}
 		}
@@ -204,7 +218,13 @@ func toIssue(node issueNode) Issue {
 	return Issue{
 		Identifier: node.Identifier,
 		Title:      node.Title,
-		State:      node.State.Name,
 		BranchName: node.BranchName,
+		State: WorkflowState{
+			ID:       node.State.ID,
+			Name:     node.State.Name,
+			Type:     node.State.Type,
+			Color:    node.State.Color,
+			Position: node.State.Position,
+		},
 	}
 }

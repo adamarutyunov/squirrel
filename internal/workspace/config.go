@@ -12,6 +12,7 @@ import (
 // UserConfig holds global per-user squirrel configuration at ~/.config/squirrel/config.yaml.
 type UserConfig struct {
 	AgentCommand string `yaml:"agent_command"`
+	SortMode     string `yaml:"sort_mode"`
 }
 
 func UserConfigPath() (string, error) {
@@ -41,11 +42,27 @@ func LoadUserConfig() (UserConfig, error) {
 	return cfg, nil
 }
 
+func SaveUserConfig(cfg UserConfig) error {
+	configPath, err := UserConfigPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		return err
+	}
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(configPath, data, 0o644)
+}
+
 // Config holds per-project squirrel configuration, stored in ~/.config/squirrel/
 // rather than the project repo so it stays local to each developer's machine.
 type Config struct {
 	SetupCommand string   `yaml:"setup_command"`
 	Symlinks     []string `yaml:"symlinks"`
+	LinearAPIKey string   `yaml:"linear_api_key"`
 }
 
 // ConfigPath returns the path where config for the given repo is stored.

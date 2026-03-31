@@ -7,6 +7,7 @@ import (
 	"github.com/adamarutyunov/launch/embed"
 	tea "github.com/charmbracelet/bubbletea"
 	"squirrel/internal/agent"
+	"squirrel/internal/linear"
 	"squirrel/internal/workspace"
 )
 
@@ -15,9 +16,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		var cmds []tea.Cmd
+		if m.companionPaneID != "" {
+			cmds = append(cmds, resizePaneWidthCmd(m.companionPaneID, 35, 30))
+		}
 		if m.hasActiveLaunch() {
 			panelHeight := m.launchPanelHeight()
-			var cmds []tea.Cmd
 			for _, panel := range m.launchPanels {
 				newPanel, cmd := panel.Update(tea.WindowSizeMsg{
 					Width:  m.launchPanelWidth(),
@@ -28,14 +32,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Batch(cmds...)
 		}
-		return m, nil
+		return m, tea.Batch(cmds...)
 
 	case tickMsg:
 		m.spinnerFrame++
 		cmds := []tea.Cmd{tickCmd()}
 		if m.spinnerFrame%4 == 0 {
 			for i, path := range m.repoPaths {
-				cmds = append(cmds, refreshRepoCmd(i, path, m.linearIssues))
+				cmds = append(cmds, refreshRepoCmd(i, path, m.repoLinearIssues[i]))
 			}
 		}
 		return m, tea.Batch(cmds...)
@@ -70,11 +74,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case linearIssuesLoadedMsg:
+		if msg.repoIdx != m.createRepoIdx {
+			return m, nil
+		}
 		m.pickerLoading = false
 		if msg.err != nil {
 			m.appendOutput(styleDanger.Render("✗ Linear: " + msg.err.Error()))
 		} else {
 			m.pickerIssues = msg.issues
+			m.pickerRepoIdx = msg.repoIdx
 			if len(msg.issues) > 0 {
 				m.pickerCursor = 0
 			}
@@ -110,11 +118,23 @@ func (m Model) handleCreateContextResult(msg createContextResultMsg) (tea.Model,
 	m.pendingCursorPath = msg.worktreePath
 
 	cfg := m.repoConfigs[msg.repoIdx]
-	refreshCmd := refreshRepoCmd(msg.repoIdx, m.repoPaths[msg.repoIdx], m.linearIssues)
-	agentCmd := launchAgentBackgroundCmd(msg.worktreePath, agent.PreferredCommand(m.agentCommand))
+	refreshCmd := refreshRepoCmd(msg.repoIdx, m.repoPaths[msg.repoIdx], m.repoLinearIssues[msg.repoIdx])
+	baseCommand := agent.PreferredCommand(m.agentCommand)
+	launchCommand := baseCommand
+	for _, issue := range m.repoLinearIssues[msg.repoIdx] {
+		if issue.BranchName == msg.contextName || issue.Identifier == msg.contextName {
+			issueCopy := issue
+			launchCommand = agent.CommandForIssue(baseCommand, &issueCopy)
+			break
+		}
+	}
+	agentCmd := launchAgentBackgroundCmd(msg.worktreePath, baseCommand, launchCommand)
 	if cfg.SetupCommand != "" {
+		if err := workspace.WriteSetupStatus(msg.worktreePath, workspace.SetupStatusRunning, 0); err != nil {
+			m.appendOutput(styleWarning.Render("⚠ Failed to mark setup as running: " + err.Error()))
+		}
 		m.appendOutput(styleDim.Render("  Running: " + cfg.SetupCommand))
-		return m, tea.Batch(refreshCmd, setupCommandCmd(msg.worktreePath, cfg.SetupCommand), agentCmd)
+		return m, tea.Batch(refreshCmd, setupCommandCmd(msg.repoIdx, msg.worktreePath, cfg.SetupCommand), agentCmd)
 	}
 	return m, tea.Batch(refreshCmd, agentCmd)
 }
@@ -130,7 +150,7 @@ func (m Model) handleSetupCommandResult(msg setupCommandResultMsg) (tea.Model, t
 	} else {
 		m.appendOutput(styleStatus.Render("✓ Setup complete"))
 	}
-	return m, nil
+	return m, refreshRepoCmd(msg.repoIdx, m.repoPaths[msg.repoIdx], m.repoLinearIssues[msg.repoIdx])
 }
 
 func (m Model) handleDeleteContextResult(msg deleteContextResultMsg) (tea.Model, tea.Cmd) {
@@ -146,6 +166,10 @@ func (m Model) handleDeleteContextResult(msg deleteContextResultMsg) (tea.Model,
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Type == tea.KeyCtrlC {
 		return m, tea.Quit
+	}
+
+	if m.prompt != nil {
+		return m.handlePromptKey(msg)
 	}
 
 	if msg.Type == tea.KeyTab {
@@ -331,7 +355,10 @@ func (m Model) submitCreateContext() (tea.Model, tea.Cmd) {
 	filtered := m.filteredPickerIssues()
 	if m.pickerCursor >= 0 && m.pickerCursor < len(filtered) {
 		selectedIssue := filtered[m.pickerCursor]
-		m.linearIssues[selectedIssue.Identifier] = selectedIssue
+		if m.repoLinearIssues[m.createRepoIdx] == nil {
+			m.repoLinearIssues[m.createRepoIdx] = map[string]linear.Issue{}
+		}
+		m.repoLinearIssues[m.createRepoIdx][selectedIssue.Identifier] = selectedIssue
 		branchName := selectedIssue.BranchName
 		if branchName == "" {
 			branchName = selectedIssue.Identifier
@@ -361,10 +388,16 @@ func (m Model) startCreateContext() (tea.Model, tea.Cmd) {
 	m.createInput.Focus()
 	m.filter.Blur()
 
-	if m.linearAPIKey != "" && len(m.pickerIssues) == 0 {
+	if m.pickerRepoIdx != repoIdx {
+		m.pickerIssues = nil
+		m.pickerCursor = -1
+		m.pickerScroll = 0
+	}
+
+	if m.repoLinearAPIKeys[repoIdx] != "" && len(m.pickerIssues) == 0 {
 		m.pickerCursor = 0
 		m.pickerLoading = true
-		return m, fetchLinearIssuesCmd(m.linearAPIKey)
+		return m, fetchLinearIssuesCmd(repoIdx, m.repoLinearAPIKeys[repoIdx])
 	}
 	if len(m.pickerIssues) > 0 {
 		m.pickerCursor = 0
@@ -395,5 +428,45 @@ func (m Model) handleDeleteKey() (tea.Model, tea.Cmd) {
 
 	m.cleanupContext(r.repoIdx, item.context.Path)
 	m.appendOutput(styleDim.Render("Deleting '" + item.context.Name + "'..."))
-	return m, deleteContextCmd(r.repoIdx, m.repoPaths[r.repoIdx], item.context, false, m.linearIssues)
+	return m, deleteContextCmd(r.repoIdx, m.repoPaths[r.repoIdx], item.context, false, m.repoLinearIssues[r.repoIdx])
+}
+
+func (m Model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.prompt = nil
+		return m, nil
+	case tea.KeyEnter:
+		return m.confirmPrompt()
+	}
+
+	switch msg.String() {
+	case "y":
+		return m.confirmPrompt()
+	case "n", "q":
+		m.prompt = nil
+		return m, nil
+	}
+
+	return m, nil
+}
+
+func (m Model) confirmPrompt() (tea.Model, tea.Cmd) {
+	if m.prompt == nil {
+		return m, nil
+	}
+
+	action := m.prompt.action
+	m.prompt = nil
+
+	switch action {
+	case promptActionOpenLaunch:
+		return m.openLaunchWithForce(true)
+	case promptActionToggleAgent:
+		return m.toggleAgentWithForce(true)
+	case promptActionAttachAgentFullscreen:
+		return m.attachAgentFullscreenWithForce(true)
+	default:
+		return m, nil
+	}
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/adamarutyunov/launch/embed"
 	tea "github.com/charmbracelet/bubbletea"
 	"squirrel/internal/agent"
+	"squirrel/internal/workspace"
 )
 
 func (m Model) copyContextPath() (tea.Model, tea.Cmd) {
@@ -49,12 +50,28 @@ func (m *Model) cleanupContext(repoIdx int, contextPath string) {
 }
 
 func (m Model) openLaunch() (tea.Model, tea.Cmd) {
+	return m.openLaunchWithForce(false)
+}
+
+func (m Model) openLaunchWithForce(force bool) (tea.Model, tea.Cmd) {
 	if m.cursor >= len(m.rows) || m.rows[m.cursor].kind != rowTypeContext {
 		return m, nil
 	}
 	r := m.rows[m.cursor]
 	repoIdx := r.repoIdx
-	contextPath := m.filteredItems[repoIdx][r.itemIdx].context.Path
+	ctx := m.filteredItems[repoIdx][r.itemIdx].context
+	contextPath := ctx.Path
+
+	if !force && ctx.SetupStatus == workspace.SetupStatusRunning {
+		m.prompt = &promptState{
+			title:       "Setup Still Running",
+			message:     "Project setup is still running for " + ctx.Name + ". Force start launch before install completes?",
+			confirmText: "enter/y: Force run",
+			cancelText:  "esc/n: Abort",
+			action:      promptActionOpenLaunch,
+		}
+		return m, nil
+	}
 
 	if m.launchContextPath[repoIdx] == contextPath {
 		return m, nil
@@ -115,6 +132,10 @@ func (m Model) closeLaunch() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) toggleAgent() (tea.Model, tea.Cmd) {
+	return m.toggleAgentWithForce(false)
+}
+
+func (m Model) toggleAgentWithForce(force bool) (tea.Model, tea.Cmd) {
 	if m.companionPaneID == "" {
 		return m, nil
 	}
@@ -123,8 +144,21 @@ func (m Model) toggleAgent() (tea.Model, tea.Cmd) {
 	}
 
 	r := m.rows[m.cursor]
-	contextPath := m.filteredItems[r.repoIdx][r.itemIdx].context.Path
+	ctx := m.filteredItems[r.repoIdx][r.itemIdx].context
+	if !force && ctx.SetupStatus == workspace.SetupStatusRunning {
+		m.prompt = &promptState{
+			title:       "Setup Still Running",
+			message:     "Project setup is still running for " + ctx.Name + ". Force start the agent before install completes?",
+			confirmText: "enter/y: Force run",
+			cancelText:  "esc/n: Abort",
+			action:      promptActionToggleAgent,
+		}
+		return m, nil
+	}
+
+	contextPath := ctx.Path
 	command := agent.PreferredCommand(m.agentCommand)
+	launchCommand := agent.CommandForIssue(command, ctx.LinearIssue)
 	agent.MarkAttached(contextPath)
 
 	shell := os.Getenv("SHELL")
@@ -132,7 +166,7 @@ func (m Model) toggleAgent() (tea.Model, tea.Cmd) {
 		shell = "/bin/sh"
 	}
 
-	respawnCommand := fmt.Sprintf("%s; exec %s", agent.SessionCommand(contextPath, command), shell)
+	respawnCommand := fmt.Sprintf("%s; exec %s", agent.AttachShellCommand(contextPath, command, launchCommand, true), shell)
 	exec.Command("tmux", "respawn-pane", "-k", "-t", m.companionPaneID, "-c", contextPath, respawnCommand).Run()
 
 	m.appendOutput(styleDim.Render("Agent: " + filepath.Base(contextPath) + " (" + command + ")"))
@@ -141,17 +175,34 @@ func (m Model) toggleAgent() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) attachAgentFullscreen() (tea.Model, tea.Cmd) {
+	return m.attachAgentFullscreenWithForce(false)
+}
+
+func (m Model) attachAgentFullscreenWithForce(force bool) (tea.Model, tea.Cmd) {
 	if m.cursor >= len(m.rows) || m.rows[m.cursor].kind != rowTypeContext {
 		return m, nil
 	}
 
 	r := m.rows[m.cursor]
-	contextPath := m.filteredItems[r.repoIdx][r.itemIdx].context.Path
+	ctx := m.filteredItems[r.repoIdx][r.itemIdx].context
+	if !force && ctx.SetupStatus == workspace.SetupStatusRunning {
+		m.prompt = &promptState{
+			title:       "Setup Still Running",
+			message:     "Project setup is still running for " + ctx.Name + ". Force start the fullscreen agent before install completes?",
+			confirmText: "enter/y: Force run",
+			cancelText:  "esc/n: Abort",
+			action:      promptActionAttachAgentFullscreen,
+		}
+		return m, nil
+	}
+
+	contextPath := ctx.Path
 	command := agent.PreferredCommand(m.agentCommand)
+	launchCommand := agent.CommandForIssue(command, ctx.LinearIssue)
 	agent.MarkAttached(contextPath)
 
 	m.appendOutput(styleDim.Render("Attaching agent (fullscreen): " + filepath.Base(contextPath) + "  (ctrl+q to detach)"))
-	return m, tea.ExecProcess(agent.AttachCommand(contextPath, command), func(err error) tea.Msg {
+	return m, tea.ExecProcess(agent.AttachCommand(contextPath, command, launchCommand), func(err error) tea.Msg {
 		return agentAttachFinishedMsg{err: err}
 	})
 }

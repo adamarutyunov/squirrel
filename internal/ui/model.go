@@ -56,23 +56,42 @@ const (
 	modeCreating
 )
 
+type promptAction int
+
+const (
+	promptActionNone promptAction = iota
+	promptActionOpenLaunch
+	promptActionToggleAgent
+	promptActionAttachAgentFullscreen
+)
+
+type promptState struct {
+	title       string
+	message     string
+	confirmText string
+	cancelText  string
+	action      promptAction
+}
+
 type sortMode int
 
 const (
 	sortModeAgent sortMode = iota
 	sortModeAlphabetical
-	sortModeLinear
+	sortModeLinearID
+	sortModeLinearStatus
 	sortModeUpdated
 )
 
 // Model is the BubbleTea model.
 type Model struct {
-	version      string
-	repoPaths    []string
-	repoNames    []string
-	repoConfigs  []workspace.Config
-	repoItems    [][]contextItem
-	linearIssues map[string]linear.Issue
+	version           string
+	repoPaths         []string
+	repoNames         []string
+	repoConfigs       []workspace.Config
+	repoItems         [][]contextItem
+	repoLinearIssues  []map[string]linear.Issue
+	repoLinearAPIKeys []string
 
 	filteredItems [][]contextItem
 	rows          []row
@@ -92,9 +111,9 @@ type Model struct {
 	createInput   textinput.Model
 	createRepoIdx int
 
-	// Linear issue picker (shown while in modeCreating when API key is set).
-	linearAPIKey  string
+	// Linear issue picker (shown while in modeCreating when the repo has a Linear API key).
 	pickerIssues  []linear.Issue
+	pickerRepoIdx int
 	pickerCursor  int // -1 = no selection; ≥0 = index into filteredPickerIssues()
 	pickerScroll  int // top visible index in filtered picker list
 	pickerLoading bool
@@ -121,15 +140,18 @@ type Model struct {
 
 	// Agent command from user config.
 	agentCommand string
+
+	prompt *promptState
 }
 
 func NewModel(
 	repoPaths []string,
 	repoContexts [][]workspace.Context,
 	repoConfigs []workspace.Config,
-	linearIssues map[string]linear.Issue,
-	linearAPIKey string,
+	repoLinearIssues []map[string]linear.Issue,
+	repoLinearAPIKeys []string,
 	agentCommand string,
+	initialSortMode string,
 	companionPaneID string,
 	version string,
 ) Model {
@@ -162,17 +184,18 @@ func NewModel(
 		repoNames:         repoNames,
 		repoConfigs:       repoConfigs,
 		repoItems:         repoItems,
-		linearIssues:      linearIssues,
-		linearAPIKey:      linearAPIKey,
+		repoLinearIssues:  repoLinearIssues,
+		repoLinearAPIKeys: repoLinearAPIKeys,
 		agentCommand:      agentCommand,
 		companionPaneID:   companionPaneID,
 		launchPanels:      make(map[int]*embed.Model),
 		launchContextPath: make(map[int]string),
 		launchFocusIndex:  -1,
+		pickerRepoIdx:     -1,
 		pickerCursor:      -1,
 		filter:            filterInput,
 		createInput:       createInput,
-		sortMode:          sortModeAgent,
+		sortMode:          parseSortMode(initialSortMode),
 	}
 	m.rebuild()
 	return m

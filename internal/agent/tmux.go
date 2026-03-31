@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"squirrel/internal/linear"
 )
 
 func PreferredCommand(userConfigCommand string) string {
@@ -22,51 +24,47 @@ func PreferredCommand(userConfigCommand string) string {
 	return "claude"
 }
 
-func AttachCommand(contextPath, command string) *exec.Cmd {
-	sessionName := sessionNameFor(contextPath, command)
-	sessionExists := SessionExists(contextPath, command)
-
-	// If session already exists, just attach to it.
-	if sessionExists {
-		shellCommand := fmt.Sprintf(
-			`tmux attach-session -t '%s' \; bind-key -n C-q detach-client`,
-			sessionName,
-		)
-		return exec.Command("sh", "-c", shellCommand)
+func CommandForIssue(command string, issue *linear.Issue) string {
+	if issue == nil {
+		return command
 	}
 
-	// No existing session — start a new one.
-	agentCommand := SessionCommand(contextPath, command)
+	if !strings.Contains(strings.ToLower(command), "claude") {
+		return command
+	}
 
-	// Bind Ctrl+Q to detach for easy exit (simpler than default Ctrl+B, D).
-	escapedPath := strings.ReplaceAll(contextPath, "'", "'\\''")
-	shellCommand := fmt.Sprintf(
-		`tmux new-session -s '%s' -c '%s' -E 'exec sh -c "%s"' \; bind-key -n C-q detach-client`,
-		sessionName, escapedPath, strings.ReplaceAll(agentCommand, `"`, `\"`),
+	prompt := fmt.Sprintf(
+		"Current Linear task: %s - %s. If the user asks you to examine the task, begin by using this issue context while inspecting the codebase.",
+		issue.Identifier,
+		issue.Title,
 	)
-	return exec.Command("sh", "-c", shellCommand)
+	return fmt.Sprintf("%s --append-system-prompt %s", command, shellQuote(prompt))
+}
+
+func AttachCommand(contextPath, sessionCommand, launchCommand string) *exec.Cmd {
+	return exec.Command("sh", "-c", AttachShellCommand(contextPath, sessionCommand, launchCommand, false))
 }
 
 // SessionCommand returns the agent command to run for a context.
 // When a saved session exists, it prefers resuming and falls back to a fresh launch.
-func SessionCommand(contextPath, command string) string {
-	commandBase := strings.Fields(command)
+func SessionCommand(contextPath, sessionCommand, launchCommand string) string {
+	commandBase := strings.Fields(sessionCommand)
 	if len(commandBase) == 0 {
-		return command
+		return launchCommand
 	}
 
 	sessionID, _ := ReadSessionID(contextPath)
 	if sessionID == "" {
-		return command
+		return launchCommand
 	}
 
 	switch commandBase[0] {
 	case "claude":
-		return fmt.Sprintf("%s --resume %s || %s", command, sessionID, command)
+		return fmt.Sprintf("%s --resume %s || %s", launchCommand, sessionID, launchCommand)
 	case "codex":
-		return fmt.Sprintf("%s resume %s || %s", command, sessionID, command)
+		return fmt.Sprintf("%s resume %s || %s", launchCommand, sessionID, launchCommand)
 	default:
-		return command
+		return launchCommand
 	}
 }
 
@@ -79,22 +77,44 @@ func MarkAttached(contextPath string) {
 	_ = WriteStatus(contextPath, StatusIdle)
 }
 
+// AttachShellCommand returns a shell command that attaches to the per-context
+// tmux-backed agent session, creating it if needed.
+// When nested is true, the command clears TMUX so the attach happens as a
+// nested client inside the current pane instead of switching the outer client.
+func AttachShellCommand(contextPath, sessionCommand, launchCommand string, nested bool) string {
+	sessionName := sessionNameFor(contextPath, sessionCommand)
+	agentCommand := SessionCommand(contextPath, sessionCommand, launchCommand)
+	escapedPath := strings.ReplaceAll(contextPath, "'", "'\\''")
+	prefix := ""
+	if nested {
+		prefix = "TMUX='' "
+	}
+
+	return fmt.Sprintf(
+		`%stmux new-session -A -s '%s' -c '%s' -E 'exec sh -c "%s"' \; set status off \; bind-key -n C-q detach-client`,
+		prefix,
+		sessionName,
+		escapedPath,
+		strings.ReplaceAll(agentCommand, `"`, `\"`),
+	)
+}
+
 // LaunchBackground starts an agent tmux session in detached mode so it's
 // ready when the user attaches later. No-op if the session already exists.
-func LaunchBackground(contextPath, command string) error {
-	sessionName := sessionNameFor(contextPath, command)
+func LaunchBackground(contextPath, sessionCommand, launchCommand string) error {
+	sessionName := sessionNameFor(contextPath, sessionCommand)
 	// Check if session already exists.
 	checkCommand := exec.Command("tmux", "has-session", "-t", sessionName)
 	if checkCommand.Run() == nil {
 		return nil // session already running
 	}
-	launchCommand := exec.Command(
+	cmd := exec.Command(
 		"tmux", "new-session", "-d",
 		"-s", sessionName,
 		"-c", contextPath,
-		"exec "+command,
+		"exec "+launchCommand,
 	)
-	return launchCommand.Run()
+	return cmd.Run()
 }
 
 // SessionExists returns true if the tmux session for this context+command exists.
@@ -146,4 +166,8 @@ func knownCommands() []string {
 func sessionNameFor(contextPath, command string) string {
 	hash := sha1.Sum([]byte(contextPath + "\x00" + command))
 	return "squirrel-agent-" + hex.EncodeToString(hash[:6])
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
