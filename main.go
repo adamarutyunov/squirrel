@@ -76,47 +76,17 @@ func main() {
 	repoLinearAPIKeys := make([]string, len(repoPaths))
 	repoLinearIssues := make([]map[string]linear.Issue, len(repoPaths))
 
-	envLinearAPIKey := os.Getenv("LINEAR_API_KEY")
-
 	for i, repoPath := range repoPaths {
 		cfg, err := workspace.LoadConfig(repoPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: %s: config: %v\n", filepath.Base(repoPath), err)
 		}
 		repoConfigs[i] = cfg
-		repoLinearAPIKeys[i] = projectLinearAPIKey(cfg, envLinearAPIKey)
+		repoLinearAPIKeys[i] = strings.TrimSpace(cfg.LinearAPIKey)
 		repoLinearIssues[i] = map[string]linear.Issue{}
 	}
 
-	// Fetch Linear issues per repo, using that repo's configured API key.
 	for i, repoPath := range repoPaths {
-		worktrees, err := git.ListWorktrees(repoPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: %s: %v\n", filepath.Base(repoPath), err)
-			continue
-		}
-
-		var branchNames []string
-		for _, wt := range worktrees {
-			if wt.Branch != "" {
-				branchNames = append(branchNames, wt.Branch)
-			}
-		}
-
-		apiKey := repoLinearAPIKeys[i]
-		if apiKey != "" {
-			identifiers := git.ExtractLinearIdentifiersFromStrings(branchNames)
-			if len(identifiers) > 0 {
-				client := linear.NewClient(apiKey)
-				fetched, err := client.FetchIssues(identifiers)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "warning: %s: linear: %v\n", filepath.Base(repoPath), err)
-				} else {
-					repoLinearIssues[i] = fetched
-				}
-			}
-		}
-
 		contexts, err := workspace.ListContexts(repoPath, repoLinearIssues[i], true)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: %s: %v\n", filepath.Base(repoPath), err)
@@ -141,13 +111,6 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
-}
-
-func projectLinearAPIKey(cfg workspace.Config, fallback string) string {
-	if strings.TrimSpace(cfg.LinearAPIKey) != "" {
-		return strings.TrimSpace(cfg.LinearAPIKey)
-	}
-	return strings.TrimSpace(fallback)
 }
 
 func launchInTmux() {

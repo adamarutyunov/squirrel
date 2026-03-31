@@ -3,6 +3,7 @@ package ui
 import (
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -200,7 +201,14 @@ func NewModel(
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(textinput.Blink, tickCmd())
+	cmds := []tea.Cmd{textinput.Blink, tickCmd()}
+	for repoIdx, apiKey := range m.repoLinearAPIKeys {
+		if strings.TrimSpace(apiKey) == "" {
+			continue
+		}
+		cmds = append(cmds, fetchRepoLinearIssuesCmd(repoIdx, m.repoPaths[repoIdx], apiKey))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m Model) CleanupLaunchPanes() {

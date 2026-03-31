@@ -58,6 +58,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.repoIdx != m.createRepoIdx {
 			return m, nil
 		}
+		if strings.TrimSpace(msg.query) != strings.TrimSpace(m.createInput.Value()) {
+			return m, nil
+		}
 		m.pickerLoading = false
 		if msg.err != nil {
 			m.appendOutput(styleDanger.Render("✗ Linear: " + msg.err.Error()))
@@ -69,6 +72,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+
+	case repoLinearIssuesLoadedMsg:
+		if msg.err != nil {
+			m.appendOutput(styleDanger.Render("✗ Linear: " + msg.err.Error()))
+			return m, nil
+		}
+		m.repoLinearIssues[msg.repoIdx] = msg.issues
+		return m, refreshRepoCmd(msg.repoIdx, m.repoPaths[msg.repoIdx], msg.issues)
 
 	case agentLaunchBackgroundMsg:
 		if msg.err != nil {
@@ -315,6 +326,10 @@ func (m Model) handleCreateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.createInput.Value() != prevValue {
 		m.pickerCursor = 0
 		m.pickerScroll = 0
+		if m.repoLinearAPIKeys[m.createRepoIdx] != "" {
+			m.pickerLoading = true
+			return m, fetchLinearIssuesCmd(m.createRepoIdx, m.repoLinearAPIKeys[m.createRepoIdx], m.createInput.Value())
+		}
 	}
 	return m, cmd
 }
@@ -366,7 +381,7 @@ func (m Model) startCreateContext() (tea.Model, tea.Cmd) {
 	if m.repoLinearAPIKeys[repoIdx] != "" && len(m.pickerIssues) == 0 {
 		m.pickerCursor = 0
 		m.pickerLoading = true
-		return m, fetchLinearIssuesCmd(repoIdx, m.repoLinearAPIKeys[repoIdx])
+		return m, fetchLinearIssuesCmd(repoIdx, m.repoLinearAPIKeys[repoIdx], "")
 	}
 	if len(m.pickerIssues) > 0 {
 		m.pickerCursor = 0

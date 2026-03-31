@@ -130,43 +130,57 @@ func (c *Client) FetchIssues(identifiers []string) (map[string]Issue, error) {
 	return issues, nil
 }
 
-// FetchAssignedIssues returns open issues assigned to the authenticated user,
-// ordered by most recently updated. Used to populate the context-creation picker.
-func (c *Client) FetchAssignedIssues() ([]Issue, error) {
-	const query = `{
-		viewer {
-			assignedIssues(
-				filter: { state: { type: { nin: ["completed", "cancelled"] } } }
-				first: 50
-				orderBy: updatedAt
-			) {
-				nodes {
-					identifier
-					title
-					branchName
-					state { id name type color position }
-				}
+// FetchPickerIssues returns the first batch of issues for the picker.
+// When query is non-empty, Linear filters results on the backend.
+func (c *Client) FetchPickerIssues(query string) ([]Issue, error) {
+	query = strings.TrimSpace(query)
+
+	gql := `query PickerIssues($filter: IssueFilter) {
+		issues(
+			filter: $filter
+			first: 50
+			orderBy: updatedAt
+		) {
+			nodes {
+				identifier
+				title
+				branchName
+				state { id name type color position }
 			}
 		}
 	}`
 
-	body, err := json.Marshal(map[string]string{"query": query})
+	variables := map[string]any{
+		"filter": nil,
+	}
+	if query != "" {
+		filters := []map[string]any{
+			{"title": map[string]any{"containsIgnoreCase": query}},
+		}
+		if number, err := strconv.Atoi(query); err == nil {
+			filters = append(filters, map[string]any{
+				"number": map[string]any{"eq": number},
+			})
+		}
+		variables["filter"] = map[string]any{"or": filters}
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"query":     gql,
+		"variables": variables,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal: %w", err)
 	}
 
-	var result struct {
-		Data struct {
-			Viewer struct {
-				AssignedIssues issueConnection `json:"assignedIssues"`
-			} `json:"viewer"`
-		} `json:"data"`
-	}
+	var result graphQLResponse[struct {
+		Issues issueConnection `json:"issues"`
+	}]
 	if err := c.doQuery(body, &result); err != nil {
 		return nil, err
 	}
 
-	nodes := result.Data.Viewer.AssignedIssues.Nodes
+	nodes := result.Data.Issues.Nodes
 	issues := make([]Issue, 0, len(nodes))
 	for _, node := range nodes {
 		issues = append(issues, toIssue(node))

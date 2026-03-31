@@ -33,6 +33,14 @@ func PaneWidth(target string) (int, error) {
 	return width, nil
 }
 
+func PaneCurrentCommand(target string) (string, error) {
+	output, err := exec.Command("tmux", "display-message", "-p", "-t", target, "#{pane_current_command}").Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
 func WidthForPercent(windowWidth, percent, minWidth int) int {
 	if windowWidth <= 0 {
 		return 0

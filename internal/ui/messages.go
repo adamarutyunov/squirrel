@@ -41,7 +41,14 @@ type clipboardMsg struct {
 
 type linearIssuesLoadedMsg struct {
 	repoIdx int
+	query   string
 	issues  []linear.Issue
+	err     error
+}
+
+type repoLinearIssuesLoadedMsg struct {
+	repoIdx int
+	issues  map[string]linear.Issue
 	err     error
 }
 

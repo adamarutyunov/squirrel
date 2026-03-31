@@ -11,6 +11,7 @@ import (
 	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
 	"squirrel/internal/agent"
+	"squirrel/internal/git"
 	"squirrel/internal/linear"
 	"squirrel/internal/tmux"
 	"squirrel/internal/workspace"
@@ -98,11 +99,40 @@ func copyToClipboardCmd(path string) tea.Cmd {
 	}
 }
 
-func fetchLinearIssuesCmd(repoIdx int, apiKey string) tea.Cmd {
+func fetchLinearIssuesCmd(repoIdx int, apiKey, query string) tea.Cmd {
 	return func() tea.Msg {
 		client := linear.NewClient(apiKey)
-		issues, err := client.FetchAssignedIssues()
-		return linearIssuesLoadedMsg{repoIdx: repoIdx, issues: issues, err: err}
+		issues, err := client.FetchPickerIssues(query)
+		return linearIssuesLoadedMsg{repoIdx: repoIdx, query: query, issues: issues, err: err}
+	}
+}
+
+func fetchRepoLinearIssuesCmd(repoIdx int, repoPath, apiKey string) tea.Cmd {
+	return func() tea.Msg {
+		if strings.TrimSpace(apiKey) == "" {
+			return repoLinearIssuesLoadedMsg{repoIdx: repoIdx, issues: map[string]linear.Issue{}}
+		}
+
+		worktrees, err := git.ListWorktrees(repoPath)
+		if err != nil {
+			return repoLinearIssuesLoadedMsg{repoIdx: repoIdx, err: err}
+		}
+
+		var branchNames []string
+		for _, wt := range worktrees {
+			if wt.Branch != "" {
+				branchNames = append(branchNames, wt.Branch)
+			}
+		}
+
+		identifiers := git.ExtractLinearIdentifiersFromStrings(branchNames)
+		if len(identifiers) == 0 {
+			return repoLinearIssuesLoadedMsg{repoIdx: repoIdx, issues: map[string]linear.Issue{}}
+		}
+
+		client := linear.NewClient(apiKey)
+		issues, err := client.FetchIssues(identifiers)
+		return repoLinearIssuesLoadedMsg{repoIdx: repoIdx, issues: issues, err: err}
 	}
 }
 
@@ -138,7 +168,7 @@ func applyManagedLayoutCmd(mainPaneID, launchPaneID string) tea.Cmd {
 		if err := tmux.ResizePaneWidth(mainPaneID, 50, 40); err != nil {
 			return nil
 		}
-		if err := tmux.ResizePaneWidth(launchPaneID, 25, 25); err != nil {
+		if err := tmux.ResizePaneWidth(launchPaneID, 15, 25); err != nil {
 			return nil
 		}
 		return nil

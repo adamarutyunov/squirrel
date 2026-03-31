@@ -108,7 +108,7 @@ func ProjectConfigTemplate() string {
 #   - node_modules
 #   - .env
 
-# Linear API key for this project. Falls back to LINEAR_API_KEY if omitted.
+# Linear API key for this project.
 # linear_api_key: lin_api_...
 `) + "\n"
 }

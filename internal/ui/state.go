@@ -133,7 +133,10 @@ func (m Model) footerLineCount() int {
 			return 1 + min(10, n)
 		}
 	}
-	return 1
+	if m.width <= 0 {
+		return 1
+	}
+	return strings.Count(m.renderFooter(m.width), "\n") + 1
 }
 
 func (m Model) statusLineCount() int {

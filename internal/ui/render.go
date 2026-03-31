@@ -142,7 +142,8 @@ func (m Model) renderFooter(w int) string {
 		return strings.Join(lines, "\n")
 
 	default:
-		return styleDim.Render("  ↑↓/jk: Nav  enter: Select  n: New  d: Del  c: Copy  a: Agent  l: Launch  L: Kill  s: Sort(" + m.sortModeLabel() + ")  ctrl+w: Pane  ctrl+u: User cfg  ctrl+p: Project cfg  q: Quit")
+		help := "  ↑↓/jk:\u00A0Nav  enter:\u00A0Select  n:\u00A0New  d:\u00A0Del  c:\u00A0Copy  a:\u00A0Agent  l:\u00A0Launch  L:\u00A0Kill  s:\u00A0Sort(" + m.sortModeLabel() + ")  ctrl+w:\u00A0Pane  ctrl+u:\u00A0User\u00A0cfg  ctrl+p:\u00A0Project\u00A0cfg  q:\u00A0Quit"
+		return styleDim.Width(max(1, w)).Render(help)
 	}
 }
 

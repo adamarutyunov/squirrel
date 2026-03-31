@@ -55,12 +55,12 @@ sq --install-hooks
 
 This installs hooks for both Claude (`~/.claude/settings.json`) and Codex (`~/.codex/hooks.json`, plus enables the `codex_hooks` feature flag). If you already have hooks configured, it will overwrite the `hooks` key — back up your settings first if needed.
 
-### 2. Set Linear API key (optional)
+### 2. Set project Linear API key (optional)
 
-To enable Linear integration, set your API key:
+To enable Linear integration, add your API key to the project config:
 
 ```sh
-export LINEAR_API_KEY=lin_api_...
+ctrl+p
 ```
 
 ### 3. Set tmux config (recommended)
@@ -102,12 +102,14 @@ setup_command: pnpm install
 symlinks:
   - node_modules
   - .env
+linear_api_key: lin_api_...
 ```
 
 | Field | Default | Description |
 |---|---|---|
 | `setup_command` | — | Command to run after creating a new context (e.g. install dependencies) |
 | `symlinks` | — | Files/directories to symlink from the main worktree into new contexts |
+| `linear_api_key` | — | Linear API key used only for this project |
 
 Project configs are stored outside the repo so they stay local to your machine.
 

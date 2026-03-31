@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -64,6 +66,10 @@ func (m Model) selectContext() Model {
 	m.selectedContextPath = ctx.Path
 	m.appendOutput(m.renderPrompt(ctx))
 	if m.companionPaneID != "" {
+		_ = setCompanionPendingCwd(m.companionPaneID, ctx.Path)
+		if companionAgentRunning(m.companionPaneID) {
+			return m
+		}
 		escapedPath := strings.ReplaceAll(ctx.Path, "'", "'\\''")
 		exec.Command("tmux", "send-keys", "-t", m.companionPaneID, "C-c", "").Run()
 		exec.Command("tmux", "send-keys", "-t", m.companionPaneID, fmt.Sprintf("cd '%s'", escapedPath), "Enter").Run()
@@ -121,7 +127,7 @@ func (m Model) openLaunchWithForce(force bool) (tea.Model, tea.Cmd) {
 	}
 
 	title := "Launch " + filepath.Base(m.repoPaths[repoIdx])
-	command := shellCommand("launch --force-autostart " + stmux.ShellQuote(contextPath))
+	command := shellCommand("launch --force-autostart --no-logs " + stmux.ShellQuote(contextPath))
 	if paneID, ok := m.launchPaneIDs[repoIdx]; ok {
 		if err := stmux.RespawnPane(paneID, contextPath, title, command); err != nil {
 			m.appendOutput(styleDanger.Render("✗ Launch: " + err.Error()))
@@ -138,13 +144,13 @@ func (m Model) openLaunchWithForce(force bool) (tea.Model, tea.Cmd) {
 		paneID, err = stmux.SplitPaneHorizontal(m.mainPaneID, contextPath, title, command)
 		if err == nil {
 			_ = stmux.ResizePaneWidth(m.mainPaneID, 50, 40)
-			_ = stmux.ResizePaneWidth(paneID, 25, 25)
+			_ = stmux.ResizePaneWidth(paneID, 15, 25)
 		}
 	} else {
 		paneID, err = stmux.SplitPaneVertical(m.firstLaunchPaneID(), contextPath, title, command)
 		if err == nil {
 			_ = stmux.ResizePaneWidth(m.mainPaneID, 50, 40)
-			_ = stmux.ResizePaneWidth(m.firstLaunchPaneID(), 25, 25)
+			_ = stmux.ResizePaneWidth(m.firstLaunchPaneID(), 15, 25)
 		}
 	}
 	if err != nil {
@@ -211,7 +217,8 @@ func (m Model) toggleAgentWithForce(force bool) (tea.Model, tea.Cmd) {
 		m.appendOutput(styleDanger.Render("✗ Agent: " + err.Error()))
 		return m, nil
 	}
-	respawnCommand := shellCommand(agent.AttachShellCommand(contextPath, command, launchCommand, true))
+	_ = setCompanionPendingCwd(m.companionPaneID, m.activeContextPath())
+	respawnCommand := companionShellCommand(agent.AttachShellCommand(contextPath, command, launchCommand, true), contextPath, m.companionPaneID)
 	if err := stmux.RespawnPane(m.companionPaneID, contextPath, "Agent", respawnCommand); err != nil {
 		m.appendOutput(styleDanger.Render("✗ Agent: " + err.Error()))
 		return m, nil
@@ -231,6 +238,74 @@ func shellCommand(command string) string {
 		return "exec " + shell
 	}
 	return command + "; exec " + shell
+}
+
+func companionShellCommand(command, fallbackPath, paneID string) string {
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/sh"
+	}
+	cwdPath, err := companionPendingCwdPath(paneID)
+	if err != nil {
+		return shellCommand(command)
+	}
+	agentFlagPath, err := companionAgentFlagPath(paneID)
+	if err != nil {
+		return shellCommand(command)
+	}
+	if strings.TrimSpace(command) == "" {
+		return fmt.Sprintf("cd %s 2>/dev/null || true; exec %s", stmux.ShellQuote(fallbackPath), shell)
+	}
+	return fmt.Sprintf(
+		"mkdir -p %s; : > %s; %s; rm -f %s; cd \"$(cat %s 2>/dev/null)\" 2>/dev/null || cd %s; exec %s",
+		stmux.ShellQuote(filepath.Dir(agentFlagPath)),
+		stmux.ShellQuote(agentFlagPath),
+		command,
+		stmux.ShellQuote(agentFlagPath),
+		stmux.ShellQuote(cwdPath),
+		stmux.ShellQuote(fallbackPath),
+		shell,
+	)
+}
+
+func setCompanionPendingCwd(paneID, cwd string) error {
+	path, err := companionPendingCwdPath(paneID)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(cwd), 0o644)
+}
+
+func companionPendingCwdPath(paneID string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	hash := sha1.Sum([]byte(paneID))
+	fileName := hex.EncodeToString(hash[:8]) + ".cwd"
+	return filepath.Join(home, ".config", "squirrel", "companion", fileName), nil
+}
+
+func companionAgentFlagPath(paneID string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	hash := sha1.Sum([]byte("agent:" + paneID))
+	fileName := hex.EncodeToString(hash[:8]) + ".active"
+	return filepath.Join(home, ".config", "squirrel", "companion", fileName), nil
+}
+
+func companionAgentRunning(paneID string) bool {
+	path, err := companionAgentFlagPath(paneID)
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(path)
+	return err == nil
 }
 
 func (m Model) firstLaunchPaneID() string {
