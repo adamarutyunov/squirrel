@@ -1,6 +1,10 @@
 # squirrel (a.k.a. SlopDeck)
 
-The best context manager for running multiple AI agents.
+The best context manager for running AI coding agents in parallel.
+
+Manage wortktrees, run agents, track their status, test worktrees locally with [launch](https://github.com/adamarutyunov/launch), integrate your Linear workspace.
+
+<img width="1752" height="1045" alt="Screenshot 2026-03-31 at 14 35 42" src="https://github.com/user-attachments/assets/18643749-dbae-4f3f-8716-1395c43fcb36" />
 
 Running several agents manually is painful:
 
