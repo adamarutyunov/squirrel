@@ -41,10 +41,6 @@ func CommandForIssue(command string, issue *linear.Issue) string {
 	return fmt.Sprintf("%s --append-system-prompt %s", command, shellQuote(prompt))
 }
 
-func AttachCommand(contextPath, sessionCommand, launchCommand string) *exec.Cmd {
-	return exec.Command("sh", "-c", AttachShellCommand(contextPath, sessionCommand, launchCommand, true))
-}
-
 // SessionCommand returns the agent command to run for a context.
 // When a saved session exists, it prefers resuming and falls back to a fresh launch.
 func SessionCommand(contextPath, sessionCommand, launchCommand string) string {
@@ -85,7 +81,7 @@ func AttachShellCommand(contextPath, sessionCommand, launchCommand string, neste
 	sessionName := sessionNameFor(contextPath, sessionCommand)
 	prefix := ""
 	if nested {
-		prefix = "export TMUX=''; "
+		prefix = "unset TMUX; "
 	}
 
 	return fmt.Sprintf(
@@ -96,14 +92,23 @@ func AttachShellCommand(contextPath, sessionCommand, launchCommand string, neste
 }
 
 // LaunchBackground starts an agent tmux session in detached mode so it's
-// ready when the user attaches later. No-op if the session already exists.
+// ready when the user attaches later. If a stale session exists with dead panes,
+// it is recreated.
 func LaunchBackground(contextPath, sessionCommand, launchCommand string) error {
 	sessionName := sessionNameFor(contextPath, sessionCommand)
-	// Check if session already exists.
-	checkCommand := exec.Command("tmux", "has-session", "-t", sessionName)
-	if checkCommand.Run() == nil {
-		return nil // session already running
+	exists, dead, err := sessionState(sessionName)
+	if err != nil {
+		return err
 	}
+	if exists && !dead {
+		return nil
+	}
+	if exists && dead {
+		if err := exec.Command("tmux", "kill-session", "-t", sessionName).Run(); err != nil {
+			return err
+		}
+	}
+
 	cmd := exec.Command(
 		"tmux", "new-session", "-d",
 		"-s", sessionName,
@@ -119,8 +124,8 @@ func LaunchBackground(contextPath, sessionCommand, launchCommand string) error {
 // SessionExists returns true if the tmux session for this context+command exists.
 func SessionExists(contextPath, command string) bool {
 	sessionName := sessionNameFor(contextPath, command)
-	checkCommand := exec.Command("tmux", "has-session", "-t", sessionName)
-	return checkCommand.Run() == nil
+	exists, dead, err := sessionState(sessionName)
+	return err == nil && exists && !dead
 }
 
 func CleanupContext(contextPath string) error {
@@ -169,4 +174,23 @@ func sessionNameFor(contextPath, command string) string {
 
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
+func sessionState(sessionName string) (exists bool, dead bool, err error) {
+	checkCommand := exec.Command("tmux", "has-session", "-t", sessionName)
+	if checkCommand.Run() != nil {
+		return false, false, nil
+	}
+
+	output, err := exec.Command("tmux", "list-panes", "-t", sessionName, "-F", "#{pane_dead}").Output()
+	if err != nil {
+		return true, false, err
+	}
+
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		if strings.TrimSpace(line) == "1" {
+			return true, true, nil
+		}
+	}
+	return true, false, nil
 }

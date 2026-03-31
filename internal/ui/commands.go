@@ -2,6 +2,8 @@ package ui
 
 import (
 	"bytes"
+	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -109,6 +111,17 @@ func launchAgentBackgroundCmd(contextPath, sessionCommand, launchCommand string)
 		err := agent.LaunchBackground(contextPath, sessionCommand, launchCommand)
 		return agentLaunchBackgroundMsg{err: err}
 	}
+}
+
+func editorShellCommand(path string) string {
+	editor := strings.TrimSpace(os.Getenv("VISUAL"))
+	if editor == "" {
+		editor = strings.TrimSpace(os.Getenv("EDITOR"))
+	}
+	if editor == "" {
+		editor = "vi"
+	}
+	return fmt.Sprintf("%s %s", editor, tmux.ShellQuote(path))
 }
 
 func applyManagedLayoutCmd(mainPaneID, launchPaneID string) tea.Cmd {

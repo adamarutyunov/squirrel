@@ -63,7 +63,6 @@ const (
 	promptActionNone promptAction = iota
 	promptActionOpenLaunch
 	promptActionToggleAgent
-	promptActionAttachAgentFullscreen
 )
 
 type promptState struct {

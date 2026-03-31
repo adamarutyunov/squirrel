@@ -45,10 +45,6 @@ type linearIssuesLoadedMsg struct {
 	err     error
 }
 
-type agentAttachFinishedMsg struct {
-	err error
-}
-
 type agentLaunchBackgroundMsg struct {
 	err error
 }

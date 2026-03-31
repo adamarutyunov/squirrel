@@ -22,6 +22,42 @@ func (m Model) copyContextPath() (tea.Model, tea.Cmd) {
 	return m, copyToClipboardCmd(item.context.Path)
 }
 
+func (m Model) openUserConfig() (tea.Model, tea.Cmd) {
+	configPath, err := workspace.EnsureUserConfigFile()
+	if err != nil {
+		m.appendOutput(styleDanger.Render("✗ User config: " + err.Error()))
+		return m, nil
+	}
+	return m.openConfigInCompanion(configPath)
+}
+
+func (m Model) openProjectConfig() (tea.Model, tea.Cmd) {
+	repoIdx := 0
+	if m.cursor < len(m.rows) && m.rows[m.cursor].repoIdx < len(m.repoPaths) {
+		repoIdx = m.rows[m.cursor].repoIdx
+	}
+	configPath, err := workspace.EnsureProjectConfigFile(m.repoPaths[repoIdx])
+	if err != nil {
+		m.appendOutput(styleDanger.Render("✗ Project config: " + err.Error()))
+		return m, nil
+	}
+	return m.openConfigInCompanion(configPath)
+}
+
+func (m Model) openConfigInCompanion(configPath string) (tea.Model, tea.Cmd) {
+	if m.companionPaneID == "" {
+		m.appendOutput(styleDanger.Render("✗ Config editor: companion pane unavailable"))
+		return m, nil
+	}
+	command := editorShellCommand(configPath)
+	exec.Command("tmux", "send-keys", "-t", m.companionPaneID, "C-c", "").Run()
+	exec.Command("tmux", "send-keys", "-t", m.companionPaneID, command, "Enter").Run()
+	_ = stmux.SelectPane(m.companionPaneID)
+	m.appendOutput(styleStatus.Render("✓ Opening config"))
+	m.appendOutput(styleDim.Render("  " + configPath))
+	return m, nil
+}
+
 func (m Model) selectContext() Model {
 	r := m.rows[m.cursor]
 	ctx := m.filteredItems[r.repoIdx][r.itemIdx].context
@@ -184,43 +220,6 @@ func (m Model) toggleAgentWithForce(force bool) (tea.Model, tea.Cmd) {
 	m.appendOutput(styleDim.Render("Agent: " + filepath.Base(contextPath) + " (" + command + ")"))
 	_ = stmux.SelectPane(m.companionPaneID)
 	return m, nil
-}
-
-func (m Model) attachAgentFullscreen() (tea.Model, tea.Cmd) {
-	return m.attachAgentFullscreenWithForce(false)
-}
-
-func (m Model) attachAgentFullscreenWithForce(force bool) (tea.Model, tea.Cmd) {
-	if m.cursor >= len(m.rows) || m.rows[m.cursor].kind != rowTypeContext {
-		return m, nil
-	}
-
-	r := m.rows[m.cursor]
-	ctx := m.filteredItems[r.repoIdx][r.itemIdx].context
-	if !force && ctx.SetupStatus == workspace.SetupStatusRunning {
-		m.prompt = &promptState{
-			title:       "Setup Still Running",
-			message:     "Project setup is still running for " + ctx.Name + ". Force start the fullscreen agent before install completes?",
-			confirmText: "enter/y: Force run",
-			cancelText:  "esc/n: Abort",
-			action:      promptActionAttachAgentFullscreen,
-		}
-		return m, nil
-	}
-
-	contextPath := ctx.Path
-	command := agent.PreferredCommand(m.agentCommand)
-	launchCommand := agent.CommandForIssue(command, ctx.LinearIssue)
-	agent.MarkAttached(contextPath)
-	if err := agent.LaunchBackground(contextPath, command, launchCommand); err != nil {
-		m.appendOutput(styleDanger.Render("✗ Agent: " + err.Error()))
-		return m, nil
-	}
-
-	m.appendOutput(styleDim.Render("Attaching agent (fullscreen): " + filepath.Base(contextPath) + "  (ctrl+q to detach)"))
-	return m, tea.ExecProcess(agent.AttachCommand(contextPath, command, launchCommand), func(err error) tea.Msg {
-		return agentAttachFinishedMsg{err: err}
-	})
 }
 
 func shellCommand(command string) string {

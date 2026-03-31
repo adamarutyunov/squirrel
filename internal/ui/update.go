@@ -70,12 +70,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case agentAttachFinishedMsg:
-		if msg.err != nil {
-			m.appendOutput(styleDanger.Render("✗ Agent: " + msg.err.Error()))
-		}
-		return m, nil
-
 	case agentLaunchBackgroundMsg:
 		if msg.err != nil {
 			m.appendOutput(styleDanger.Render("✗ Agent launch: " + msg.err.Error()))
@@ -243,14 +237,16 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.startCreateContext()
 	case "c":
 		return m.copyContextPath()
+	case "ctrl+u":
+		return m.openUserConfig()
+	case "ctrl+p":
+		return m.openProjectConfig()
 	case "l":
 		return m.openLaunch()
 	case "L":
 		return m.closeLaunch()
 	case "a":
 		return m.toggleAgent()
-	case "A":
-		return m.attachAgentFullscreen()
 	case "s":
 		m.cycleSortMode()
 		return m, nil
@@ -437,8 +433,6 @@ func (m Model) confirmPrompt() (tea.Model, tea.Cmd) {
 		return m.openLaunchWithForce(true)
 	case promptActionToggleAgent:
 		return m.toggleAgentWithForce(true)
-	case promptActionAttachAgentFullscreen:
-		return m.attachAgentFullscreenWithForce(true)
 	default:
 		return m, nil
 	}

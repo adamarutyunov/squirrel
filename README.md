@@ -16,9 +16,10 @@ Squirrel gives you a single terminal UI to manage contexts, run agents in them, 
 
 - **Runs in terminal, powered by tmux**;
 - **One-key context creation** — creates a git worktree with a new branch;
-- **Agent management** — launch Claude or Codex agents per context, track their status live, attach side-by-side or fullscreen;
+- **Agent management** — launch Claude or Codex agents per context, track their status live, attach side-by-side;
 - **Task manager integration** — link Linear issues to your worktrees by task name, or create new contexts out of issues;
 - **Companion terminal pane** — a real shell runs side-by-side with squirrel; `Ctrl+W` to toggle between them;
+- **Config editing** — open user and project config files directly in your editor;
 - **Launch integration** — embedded [launch](https://github.com/adamarutyunov/launch) panels for managing project processes; one panel per project, switching contexts within a project restarts processes automatically;
 - **Session resume** — sessions are persistent, reopen squirrel and reattach to existing agent sessions.
 
@@ -120,12 +121,13 @@ Project configs are stored outside the repo so they stay local to your machine.
 | `d` | Delete context (double-press for dirty worktrees) |
 | `c` | Copy context path to clipboard |
 | `a` | Launch agent in companion pane |
-| `A` | Launch agent fullscreen (Ctrl+Q to detach) |
 | `l` | Open launch for context (no-op if already open; switches if different context in same project) |
 | `L` | Kill launch for current project |
 | `s` | Cycle sort mode (Agent / Alpha / Linear / Updated) |
 | `Tab` | Cycle focus: context list → launch panels → context list |
 | `Ctrl+W` | Toggle between squirrel and terminal pane |
+| `Ctrl+U` | Open user config in `$VISUAL` / `$EDITOR` |
+| `Ctrl+P` | Open project config for the selected repo in `$VISUAL` / `$EDITOR` |
 | `q` | Quit |
 
 Bug reports and pull requests are welcome at [github.com/adamarutyunov/squirrel](https://github.com/adamarutyunov/squirrel/issues).

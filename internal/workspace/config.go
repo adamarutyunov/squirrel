@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -13,6 +14,18 @@ import (
 type UserConfig struct {
 	AgentCommand string `yaml:"agent_command"`
 	SortMode     string `yaml:"sort_mode"`
+}
+
+func UserConfigTemplate() string {
+	return strings.TrimSpace(`
+# Global squirrel settings
+
+# Command used to launch agents.
+# agent_command: claude --dangerously-skip-permissions
+
+# Initial sort mode.
+# sort_mode: linear_status
+`) + "\n"
 }
 
 func UserConfigPath() (string, error) {
@@ -57,12 +70,47 @@ func SaveUserConfig(cfg UserConfig) error {
 	return os.WriteFile(configPath, data, 0o644)
 }
 
+func EnsureUserConfigFile() (string, error) {
+	configPath, err := UserConfigPath()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		if err := os.WriteFile(configPath, []byte(UserConfigTemplate()), 0o644); err != nil {
+			return "", err
+		}
+	} else if err != nil {
+		return "", err
+	}
+	return configPath, nil
+}
+
 // Config holds per-project squirrel configuration, stored in ~/.config/squirrel/
 // rather than the project repo so it stays local to each developer's machine.
 type Config struct {
 	SetupCommand string   `yaml:"setup_command"`
 	Symlinks     []string `yaml:"symlinks"`
 	LinearAPIKey string   `yaml:"linear_api_key"`
+}
+
+func ProjectConfigTemplate() string {
+	return strings.TrimSpace(`
+# Project-local squirrel settings
+
+# Command to run after creating a new context.
+# setup_command: pnpm install
+
+# Paths to symlink from the main worktree into new contexts.
+# symlinks:
+#   - node_modules
+#   - .env
+
+# Linear API key for this project. Falls back to LINEAR_API_KEY if omitted.
+# linear_api_key: lin_api_...
+`) + "\n"
 }
 
 // ConfigPath returns the path where config for the given repo is stored.
@@ -116,4 +164,22 @@ func SaveConfig(repoPath string, cfg Config) error {
 		return err
 	}
 	return os.WriteFile(configPath, data, 0o644)
+}
+
+func EnsureProjectConfigFile(repoPath string) (string, error) {
+	configPath, err := ConfigPath(repoPath)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		if err := os.WriteFile(configPath, []byte(ProjectConfigTemplate()), 0o644); err != nil {
+			return "", err
+		}
+	} else if err != nil {
+		return "", err
+	}
+	return configPath, nil
 }
