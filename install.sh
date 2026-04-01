@@ -28,30 +28,44 @@ install_bin() {
 resolve_version() {
   repo="$1"
   version=$(curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" \
-    | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/' || true)
+    | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
 
-  if [ -n "$version" ]; then
-    echo "$version"
-  else
-    echo "main"
+  if [ -z "$version" ]; then
+    echo "Error: could not determine latest version for ${repo}"
+    exit 1
   fi
+
+  echo "$version"
 }
 
-clone_repo() {
+download_release() {
   repo="$1"
   version="$2"
-  target="$3"
+  archive="$3"
+  bin="$4"
+  target="$5"
+  url="https://github.com/${repo}/releases/download/${version}/${archive}_${OS}_${ARCH}.tar.gz"
 
-  if [ "$version" = "main" ]; then
-    git clone --depth 1 "https://github.com/${repo}.git" "$target"
-  else
-    git clone --depth 1 --branch "$version" "https://github.com/${repo}.git" "$target"
-  fi
+  curl -fsSL "$url" | tar -xz -C "$target"
+  install_bin "$target/$bin" "$bin"
 }
 
 require_cmd curl
-require_cmd git
-require_cmd go
+require_cmd tar
+require_cmd install
+
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+case "$OS" in
+  darwin|linux) ;;
+  *) echo "Error: unsupported OS '$OS'"; exit 1 ;;
+esac
+
+ARCH=$(uname -m)
+case "$ARCH" in
+  x86_64) ARCH="amd64" ;;
+  arm64|aarch64) ARCH="arm64" ;;
+  *) echo "Error: unsupported architecture '$ARCH'"; exit 1 ;;
+esac
 
 if [ -z "$VERSION" ]; then
   VERSION=$(resolve_version "$SQUIRREL_REPO")
@@ -64,26 +78,14 @@ fi
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-echo "Fetching sources..."
-clone_repo "$LAUNCH_REPO" "$LAUNCH_VERSION" "$TMP/launch"
-clone_repo "$SQUIRREL_REPO" "$VERSION" "$TMP/squirrel"
-
 if ! command -v "$LAUNCH_BIN" >/dev/null 2>&1; then
   echo "Installing launch dependency (${LAUNCH_VERSION})..."
-  (
-    cd "$TMP/launch"
-    GOCACHE="${GOCACHE:-$TMP/.gocache}" go build -o "$TMP/$LAUNCH_BIN" .
-  )
-  install_bin "$TMP/$LAUNCH_BIN" "$LAUNCH_BIN"
+  download_release "$LAUNCH_REPO" "$LAUNCH_VERSION" "$LAUNCH_BIN" "$LAUNCH_BIN" "$TMP"
 else
   echo "launch already installed; skipping binary install"
 fi
 
-echo "Installing squirrel ${VERSION}..."
-(
-  cd "$TMP/squirrel"
-  GOCACHE="${GOCACHE:-$TMP/.gocache}" go build -o "$TMP/$SQUIRREL_BIN" .
-)
-install_bin "$TMP/$SQUIRREL_BIN" "$SQUIRREL_BIN"
+echo "Installing squirrel ${VERSION} (${OS}/${ARCH})..."
+download_release "$SQUIRREL_REPO" "$VERSION" "squirrel" "$SQUIRREL_BIN" "$TMP"
 
 echo "Done. Run: $SQUIRREL_BIN"

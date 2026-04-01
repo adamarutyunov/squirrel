@@ -39,6 +39,12 @@ Or use the install script:
 curl -fsSL https://raw.githubusercontent.com/adamarutyunov/squirrel/main/install.sh | sh
 ```
 
+Or install a specific version:
+
+```sh
+VERSION=v1.0.0 curl -fsSL https://raw.githubusercontent.com/adamarutyunov/squirrel/main/install.sh | sh
+```
+
 Or build from source:
 
 ```sh
