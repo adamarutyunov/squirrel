@@ -10,10 +10,6 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 )
 
-require github.com/adamarutyunov/launch v0.0.0
-
-replace github.com/adamarutyunov/launch => ../launch
-
 require (
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/charmbracelet/colorprofile v0.4.1 // indirect
