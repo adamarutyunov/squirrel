@@ -142,7 +142,21 @@ func (m Model) renderFooter(w int) string {
 		return strings.Join(lines, "\n")
 
 	default:
-		help := "  ↑↓/jk:\u00A0Nav  enter:\u00A0Select  n:\u00A0New  d:\u00A0Del  c:\u00A0Copy  a:\u00A0Agent  l:\u00A0Launch  L:\u00A0Kill  s:\u00A0Sort(" + m.sortModeLabel() + ")  ctrl+w:\u00A0Pane  ctrl+u:\u00A0User\u00A0cfg  ctrl+p:\u00A0Project\u00A0cfg  q:\u00A0Quit"
+		help := buildShortcutHelp(
+			shortcutItem{key: "↑↓/jk", action: "Nav"},
+			shortcutItem{key: "enter", action: "Select"},
+			shortcutItem{key: "n", action: "New"},
+			shortcutItem{key: "d", action: "Del"},
+			shortcutItem{key: "c", action: "Copy"},
+			shortcutItem{key: "a", action: "Agent"},
+			shortcutItem{key: "l", action: "Launch"},
+			shortcutItem{key: "L", action: "Kill"},
+			shortcutItem{key: "s", action: "Sort(" + m.sortModeLabel() + ")"},
+			shortcutItem{key: "ctrl+r", action: "Pane"},
+			shortcutItem{key: "ctrl+u", action: joinShortcutWords("User", "cfg")},
+			shortcutItem{key: "ctrl+p", action: joinShortcutWords("Project", "cfg")},
+			shortcutItem{key: "q", action: "Quit"},
+		)
 		return styleDim.Width(max(1, w)).Render(help)
 	}
 }
@@ -169,9 +183,10 @@ func (m Model) renderContext(r row, selected bool, w int) string {
 	const prefixWidth = 4
 	const installWidth = 3
 	const dirtyWidth = 2
+	const agentWidth = 3
 	const launchWidth = 2
 	const timeWidth = 8
-	rightWidth := installWidth + dirtyWidth + launchWidth + timeWidth
+	rightWidth := installWidth + dirtyWidth + agentWidth + launchWidth + timeWidth
 
 	middleWidth := w - prefixWidth - rightWidth
 	if middleWidth < 10 {
@@ -226,6 +241,10 @@ func (m Model) renderContext(r row, selected bool, w int) string {
 	if ctx.IsDirty {
 		dirtyStr = "● "
 	}
+	agentStr := "   "
+	if m.companionAgentContextPath == ctx.Path {
+		agentStr = "🤖 "
+	}
 	installStr := "   "
 	if ctx.SetupStatus == workspace.SetupStatusRunning {
 		installStr = "🛠 "
@@ -236,10 +255,10 @@ func (m Model) renderContext(r row, selected bool, w int) string {
 	}
 
 	isActive := m.selectedContextPath != "" && ctx.Path == m.selectedContextPath
-	return m.renderContextRow(ctx, namePadded, branchPadded, installStr, dirtyStr, launchStr, timeStr, hasLinear, linearColW, w, selected, isActive)
+	return m.renderContextRow(ctx, namePadded, branchPadded, installStr, dirtyStr, agentStr, launchStr, timeStr, hasLinear, linearColW, w, selected, isActive)
 }
 
-func (m Model) renderContextRow(ctx workspace.Context, namePadded, branchPadded, installStr, dirtyStr, launchStr, timeStr string, hasLinear bool, linearColW, w int, isCursor, isActive bool) string {
+func (m Model) renderContextRow(ctx workspace.Context, namePadded, branchPadded, installStr, dirtyStr, agentStr, launchStr, timeStr string, hasLinear bool, linearColW, w int, isCursor, isActive bool) string {
 	base := lipgloss.NewStyle()
 	if isCursor {
 		base = base.Background(colorSelectionActive)
@@ -288,6 +307,12 @@ func (m Model) renderContextRow(ctx workspace.Context, namePadded, branchPadded,
 	} else {
 		dirtyStyled = base.Foreground(colorDim).Render(dirtyStr)
 	}
+	var agentStyled string
+	if agentStr == "🤖 " {
+		agentStyled = base.Foreground(colorBlue).Render(agentStr)
+	} else {
+		agentStyled = base.Foreground(colorDim).Render(agentStr)
+	}
 	installStyled := base.Foreground(colorAmber).Render(installStr)
 
 	var launchStyled string
@@ -311,13 +336,13 @@ func (m Model) renderContextRow(ctx workspace.Context, namePadded, branchPadded,
 	var line string
 	switch {
 	case branchPadded != "" && hasLinear:
-		line = prefixStyled + nameStyled + branchStyled + base.Render("  ") + linearStyled + installStyled + dirtyStyled + launchStyled + timeStyled
+		line = prefixStyled + nameStyled + branchStyled + base.Render("  ") + linearStyled + installStyled + dirtyStyled + agentStyled + launchStyled + timeStyled
 	case branchPadded != "":
-		line = prefixStyled + nameStyled + branchStyled + installStyled + dirtyStyled + launchStyled + timeStyled
+		line = prefixStyled + nameStyled + branchStyled + installStyled + dirtyStyled + agentStyled + launchStyled + timeStyled
 	case hasLinear:
-		line = prefixStyled + nameStyled + base.Render("  ") + linearStyled + installStyled + dirtyStyled + launchStyled + timeStyled
+		line = prefixStyled + nameStyled + base.Render("  ") + linearStyled + installStyled + dirtyStyled + agentStyled + launchStyled + timeStyled
 	default:
-		line = prefixStyled + nameStyled + installStyled + dirtyStyled + launchStyled + timeStyled
+		line = prefixStyled + nameStyled + installStyled + dirtyStyled + agentStyled + launchStyled + timeStyled
 	}
 
 	if isCursor {

@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"squirrel/internal/agent"
+	"squirrel/internal/layout"
 	stmux "squirrel/internal/tmux"
 	"squirrel/internal/workspace"
 )
@@ -54,6 +55,7 @@ func (m Model) openConfigInCompanion(configPath string) (tea.Model, tea.Cmd) {
 	command := editorShellCommand(configPath)
 	exec.Command("tmux", "send-keys", "-t", m.companionPaneID, "C-c", "").Run()
 	exec.Command("tmux", "send-keys", "-t", m.companionPaneID, command, "Enter").Run()
+	m.companionAgentContextPath = ""
 	_ = stmux.SelectPane(m.companionPaneID)
 	m.appendOutput(styleStatus.Render("✓ Opening config"))
 	m.appendOutput(styleDim.Render("  " + configPath))
@@ -74,6 +76,7 @@ func (m Model) selectContext() Model {
 		exec.Command("tmux", "send-keys", "-t", m.companionPaneID, "C-c", "").Run()
 		exec.Command("tmux", "send-keys", "-t", m.companionPaneID, fmt.Sprintf("cd '%s'", escapedPath), "Enter").Run()
 		exec.Command("tmux", "send-keys", "-t", m.companionPaneID, "C-l", "").Run()
+		m.companionAgentContextPath = ""
 	}
 	return m
 }
@@ -86,7 +89,7 @@ func (m *Model) cleanupContext(repoIdx int, contextPath string) {
 		}
 		delete(m.launchContextPath, repoIdx)
 		if m.mainPaneID != "" {
-			_ = stmux.ResizePaneWidth(m.mainPaneID, 65, 40)
+			_ = layout.MainPaneSoloWidth.Resize(m.mainPaneID)
 		}
 	}
 }
@@ -126,8 +129,8 @@ func (m Model) openLaunchWithForce(force bool) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	title := "Launch " + filepath.Base(m.repoPaths[repoIdx])
-	command := shellCommand("launch --force-autostart --no-logs " + stmux.ShellQuote(contextPath))
+	title := formatPaneTitle("Launch "+filepath.Base(m.repoPaths[repoIdx]), ctx.Name)
+	command := shellCommand("launch --force-autostart --embed " + stmux.ShellQuote(contextPath))
 	if paneID, ok := m.launchPaneIDs[repoIdx]; ok {
 		if err := stmux.RespawnPane(paneID, contextPath, title, command); err != nil {
 			m.appendOutput(styleDanger.Render("✗ Launch: " + err.Error()))
@@ -143,14 +146,12 @@ func (m Model) openLaunchWithForce(force bool) (tea.Model, tea.Cmd) {
 	if len(m.launchPaneIDs) == 0 {
 		paneID, err = stmux.SplitPaneHorizontal(m.mainPaneID, contextPath, title, command)
 		if err == nil {
-			_ = stmux.ResizePaneWidth(m.mainPaneID, 50, 40)
-			_ = stmux.ResizePaneWidth(paneID, 15, 25)
+			_ = layout.ApplyLaunchLayout(m.mainPaneID, paneID)
 		}
 	} else {
 		paneID, err = stmux.SplitPaneVertical(m.firstLaunchPaneID(), contextPath, title, command)
 		if err == nil {
-			_ = stmux.ResizePaneWidth(m.mainPaneID, 50, 40)
-			_ = stmux.ResizePaneWidth(m.firstLaunchPaneID(), 15, 25)
+			_ = layout.ApplyLaunchLayout(m.mainPaneID, m.firstLaunchPaneID())
 		}
 	}
 	if err != nil {
@@ -178,7 +179,7 @@ func (m Model) closeLaunch() (tea.Model, tea.Cmd) {
 	delete(m.launchPaneIDs, repoIdx)
 	delete(m.launchContextPath, repoIdx)
 	if len(m.launchPaneIDs) == 0 {
-		_ = stmux.ResizePaneWidth(m.mainPaneID, 65, 40)
+		_ = layout.MainPaneSoloWidth.Resize(m.mainPaneID)
 	}
 	m.appendOutput(styleStatus.Render("✓ Processes stopped"))
 	return m, nil
@@ -219,14 +220,23 @@ func (m Model) toggleAgentWithForce(force bool) (tea.Model, tea.Cmd) {
 	}
 	_ = setCompanionPendingCwd(m.companionPaneID, m.activeContextPath())
 	respawnCommand := companionShellCommand(agent.AttachShellCommand(contextPath, command, launchCommand, true), contextPath, m.companionPaneID)
-	if err := stmux.RespawnPane(m.companionPaneID, contextPath, "Agent", respawnCommand); err != nil {
+	if err := stmux.RespawnPane(m.companionPaneID, contextPath, formatPaneTitle("Agent", ctx.Name), respawnCommand); err != nil {
 		m.appendOutput(styleDanger.Render("✗ Agent: " + err.Error()))
 		return m, nil
 	}
 
+	m.companionAgentContextPath = contextPath
 	m.appendOutput(styleDim.Render("Agent: " + filepath.Base(contextPath) + " (" + command + ")"))
 	_ = stmux.SelectPane(m.companionPaneID)
 	return m, nil
+}
+
+func formatPaneTitle(base, contextName string) string {
+	contextName = strings.TrimSpace(contextName)
+	if contextName == "" {
+		return base
+	}
+	return base + " (" + truncateRunes(contextName, 18) + ")"
 }
 
 func shellCommand(command string) string {

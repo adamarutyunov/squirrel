@@ -11,6 +11,7 @@ import (
 
 	"squirrel/internal/agent"
 	"squirrel/internal/git"
+	"squirrel/internal/layout"
 	"squirrel/internal/linear"
 	"squirrel/internal/ui"
 	"squirrel/internal/workspace"
@@ -56,7 +57,7 @@ func main() {
 		exec.Command("tmux", "select-pane", "-t", mainPaneID, "-T", "Squirrel "+Version).Run()
 		defer func() {
 			exec.Command("tmux", "kill-pane", "-t", companionPaneID).Run()
-			exec.Command("tmux", "unbind-key", "-n", "C-w").Run()
+			exec.Command("tmux", "unbind-key", "-n", "C-t").Run()
 		}()
 	}
 
@@ -120,7 +121,7 @@ func launchInTmux() {
 		os.Exit(1)
 	}
 	cmd := exec.Command("sh", "-c", fmt.Sprintf(
-		`tmux new-session '%s' \; set mouse on \; set status off \; set pane-border-status top \; set pane-border-format '#{?pane_active,#[bold fg=#f59e0b],#[fg=#71717a]} #{pane_title} ' \; set pane-border-style 'fg=#71717a' \; set pane-active-border-style 'fg=#f59e0b'`,
+		`tmux new-session '%s' \; set mouse on \; set xterm-keys on \; set status off \; set pane-border-status top \; set pane-border-format '#{?pane_active,#[bold fg=#f59e0b],#[fg=#71717a]} #{pane_title} ' \; set pane-border-style 'fg=#71717a' \; set pane-active-border-style 'fg=#f59e0b'`,
 		exePath,
 	))
 	cmd.Stdin = os.Stdin
@@ -136,15 +137,15 @@ func createCompanionPane(mainPaneID, dir string) string {
 	if shell == "" {
 		shell = "/bin/sh"
 	}
-	output, err := exec.Command("tmux", "split-window", "-h", "-d", "-t", mainPaneID, "-l", "35%", "-c", dir, "-P", "-F", "#{pane_id}", shell).Output()
+	output, err := exec.Command("tmux", "split-window", "-h", "-d", "-t", mainPaneID, "-l", layout.CompanionPaneWidth.SplitArg(), "-c", dir, "-P", "-F", "#{pane_id}", shell).Output()
 	if err != nil {
 		return ""
 	}
 	paneID := strings.TrimSpace(string(output))
 	_ = exec.Command("tmux", "select-pane", "-t", paneID, "-T", "Agent").Run()
 
-	// Bind Ctrl+W to toggle between panes (works from either pane).
-	exec.Command("tmux", "bind-key", "-n", "C-w", "select-pane", "-t", ":.+").Run()
+	// Bind Ctrl+T to toggle between panes (works from either pane).
+	exec.Command("tmux", "bind-key", "-n", "C-t", "select-pane", "-t", ":.+").Run()
 
 	return paneID
 }

@@ -118,7 +118,13 @@ func LaunchBackground(contextPath, sessionCommand, launchCommand string) error {
 	if err := cmd.Run(); err != nil {
 		return err
 	}
-	return exec.Command("tmux", "set-option", "-t", sessionName, "status", "off").Run()
+	if err := exec.Command("tmux", "set-option", "-t", sessionName, "status", "off").Run(); err != nil {
+		return err
+	}
+	if err := exec.Command("tmux", "set-option", "-t", sessionName, "xterm-keys", "on").Run(); err != nil {
+		return err
+	}
+	return exec.Command("tmux", "set-option", "-t", sessionName, "mouse", "on").Run()
 }
 
 // SessionExists returns true if the tmux session for this context+command exists.

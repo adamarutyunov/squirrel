@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"squirrel/internal/agent"
 	"squirrel/internal/git"
+	"squirrel/internal/layout"
 	"squirrel/internal/linear"
 	"squirrel/internal/tmux"
 	"squirrel/internal/workspace"
@@ -156,19 +157,7 @@ func editorShellCommand(path string) string {
 
 func applyManagedLayoutCmd(mainPaneID, launchPaneID string) tea.Cmd {
 	return func() tea.Msg {
-		if strings.TrimSpace(mainPaneID) == "" {
-			return nil
-		}
-		if strings.TrimSpace(launchPaneID) == "" {
-			if err := tmux.ResizePaneWidth(mainPaneID, 65, 40); err != nil {
-				return nil
-			}
-			return nil
-		}
-		if err := tmux.ResizePaneWidth(mainPaneID, 50, 40); err != nil {
-			return nil
-		}
-		if err := tmux.ResizePaneWidth(launchPaneID, 15, 25); err != nil {
+		if err := layout.ApplyLaunchLayout(mainPaneID, launchPaneID); err != nil {
 			return nil
 		}
 		return nil

@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"squirrel/internal/agent"
+	"squirrel/internal/layout"
 	"squirrel/internal/linear"
 	stmux "squirrel/internal/tmux"
 	"squirrel/internal/workspace"
@@ -172,7 +173,7 @@ func (m *Model) pruneClosedLaunchPanes() {
 		removed = true
 	}
 	if removed && m.mainPaneID != "" {
-		_ = stmux.ResizePaneWidth(m.mainPaneID, 65, 40)
+		_ = layout.MainPaneSoloWidth.Resize(m.mainPaneID)
 	}
 }
 

@@ -131,7 +131,7 @@ Project configs are stored outside the repo so they stay local to your machine.
 | `L` | Kill launch for current project |
 | `s` | Cycle sort mode (Agent / Alpha / Linear / Updated) |
 | `Tab` | Cycle focus: context list → launch panels → context list |
-| `Ctrl+W` | Toggle between squirrel and terminal pane |
+| `Ctrl+T` | Toggle between squirrel and terminal pane |
 | `Ctrl+U` | Open user config in `$VISUAL` / `$EDITOR` |
 | `Ctrl+P` | Open project config for the selected repo in `$VISUAL` / `$EDITOR` |
 | `q` | Quit |

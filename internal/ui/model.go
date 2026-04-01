@@ -130,6 +130,8 @@ type Model struct {
 	mainPaneID string
 	// Companion tmux pane (real terminal on the right).
 	companionPaneID string
+	// Context currently opened as an agent in the companion pane.
+	companionAgentContextPath string
 
 	// Launch panes, one per project (keyed by repoIdx).
 	launchPaneIDs     map[int]string
