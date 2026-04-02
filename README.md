@@ -29,11 +29,7 @@ Squirrel gives you a single terminal UI to manage contexts, run agents in them, 
 
 ## Install
 
-```sh
-go install squirrel@latest
-```
-
-Or use the install script:
+Use the install script:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/adamarutyunov/squirrel/main/install.sh | sh
