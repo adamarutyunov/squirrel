@@ -22,7 +22,7 @@ Squirrel gives you a single terminal UI to manage contexts, run agents in them, 
 - **One-key context creation** — creates a git worktree with a new branch;
 - **Agent management** — launch Claude or Codex agents per context, track their status live, attach side-by-side;
 - **Task manager integration** — link Linear issues to your worktrees by task name, or create new contexts out of issues;
-- **Companion terminal pane** — a real shell runs side-by-side with squirrel; `Ctrl+W` to toggle between them;
+- **Companion terminal pane** — a real shell runs side-by-side with squirrel; `Ctrl+T` to toggle between them;
 - **Config editing** — open user and project config files directly in your editor;
 - **Launch integration** — embedded [launch](https://github.com/adamarutyunov/launch) panels for managing project processes; one panel per project, switching contexts within a project restarts processes automatically;
 - **Session resume** — sessions are persistent, reopen squirrel and reattach to existing agent sessions.
