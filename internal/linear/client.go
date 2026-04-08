@@ -42,6 +42,7 @@ func NewClient(apiKey string) *Client {
 }
 
 var identifierRegex = regexp.MustCompile(`^([A-Z][A-Z0-9]+)-(\d+)$`)
+var pickerIdentifierRegex = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9]+)-(\d*)$`)
 
 type parsedID struct {
 	teamKey string
@@ -162,6 +163,9 @@ func (c *Client) FetchPickerIssues(query string) ([]Issue, error) {
 				"number": map[string]any{"eq": number},
 			})
 		}
+		if identifierFilter := pickerIdentifierFilter(query); identifierFilter != nil {
+			filters = append(filters, identifierFilter)
+		}
 		variables["filter"] = map[string]any{"or": filters}
 	}
 
@@ -186,6 +190,35 @@ func (c *Client) FetchPickerIssues(query string) ([]Issue, error) {
 		issues = append(issues, toIssue(node))
 	}
 	return issues, nil
+}
+
+func pickerIdentifierFilter(query string) map[string]any {
+	matches := pickerIdentifierRegex.FindStringSubmatch(strings.TrimSpace(query))
+	if matches == nil {
+		return nil
+	}
+
+	teamKey := strings.ToUpper(matches[1])
+	numberPart := matches[2]
+	if numberPart == "" {
+		return map[string]any{
+			"team": map[string]any{
+				"key": map[string]any{"eq": teamKey},
+			},
+		}
+	}
+
+	number, err := strconv.Atoi(numberPart)
+	if err != nil {
+		return nil
+	}
+
+	return map[string]any{
+		"team": map[string]any{
+			"key": map[string]any{"eq": teamKey},
+		},
+		"number": map[string]any{"eq": number},
+	}
 }
 
 func (c *Client) doQueryMap(body []byte) (map[string]json.RawMessage, error) {

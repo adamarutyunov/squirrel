@@ -124,7 +124,7 @@ Project configs are stored outside the repo so they stay local to your machine.
 | Key | Action |
 |---|---|
 | `j` / `k` or `Up` / `Down` | Navigate |
-| `Enter` | Select context (cd in terminal pane) |
+| `Enter` | Select context, cd in terminal pane, and focus it |
 | `n` | New context (with Linear issue picker if API key set) |
 | `d` | Delete context (double-press for dirty worktrees) |
 | `c` | Copy context path to clipboard |

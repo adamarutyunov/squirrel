@@ -102,7 +102,7 @@ func main() {
 	}
 
 	model := ui.NewModel(repoPaths, repoContexts, repoConfigs, repoLinearIssues, repoLinearAPIKeys, userConfig.AgentCommand, userConfig.SortMode, mainPaneID, companionPaneID)
-	program := tea.NewProgram(model, tea.WithAltScreen())
+	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	finalModel, err := program.Run()
 	if typed, ok := finalModel.(ui.Model); ok {

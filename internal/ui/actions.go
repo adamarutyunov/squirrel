@@ -70,6 +70,7 @@ func (m Model) selectContext() Model {
 	if m.companionPaneID != "" {
 		_ = setCompanionPendingCwd(m.companionPaneID, ctx.Path)
 		if companionAgentRunning(m.companionPaneID) {
+			_ = stmux.SelectPane(m.companionPaneID)
 			return m
 		}
 		escapedPath := strings.ReplaceAll(ctx.Path, "'", "'\\''")
@@ -77,6 +78,7 @@ func (m Model) selectContext() Model {
 		exec.Command("tmux", "send-keys", "-t", m.companionPaneID, fmt.Sprintf("cd '%s'", escapedPath), "Enter").Run()
 		exec.Command("tmux", "send-keys", "-t", m.companionPaneID, "C-l", "").Run()
 		m.companionAgentContextPath = ""
+		_ = stmux.SelectPane(m.companionPaneID)
 	}
 	return m
 }

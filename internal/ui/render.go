@@ -119,6 +119,7 @@ func (m Model) renderFooter(w int) string {
 		}
 
 		filtered := m.filteredPickerIssues()
+		pickerIDWidth := maxIssueIdentifierWidth(filtered)
 		total := len(filtered)
 		if total == 0 {
 			return inputLine
@@ -129,12 +130,13 @@ func (m Model) renderFooter(w int) string {
 		for i := 0; i < shown; i++ {
 			idx := m.pickerScroll + i
 			issue := filtered[idx]
+			idLabel := padIssueIdentifier(issue.Identifier, pickerIDWidth)
 			if idx == m.pickerCursor {
-				idStr := lipgloss.NewStyle().Background(colorSelection).Foreground(colorBlue).Bold(true).Render("  " + issue.Identifier)
-				titleStr := lipgloss.NewStyle().Background(colorSelection).Foreground(colorWhite).Width(w - 2 - lipgloss.Width("  "+issue.Identifier) - 2).Render("  " + issue.Title)
+				idStr := lipgloss.NewStyle().Background(colorSelection).Foreground(colorBlue).Bold(true).Render("  " + idLabel)
+				titleStr := lipgloss.NewStyle().Background(colorSelection).Foreground(colorWhite).Width(w - 2 - lipgloss.Width("  "+idLabel) - 2).Render("  " + issue.Title)
 				lines = append(lines, idStr+titleStr)
 			} else {
-				idStr := styleLinearID.Render("  " + issue.Identifier)
+				idStr := styleLinearID.Render("  " + idLabel)
 				titleStr := styleDim.Render("  " + issue.Title)
 				lines = append(lines, idStr+titleStr)
 			}
@@ -245,9 +247,10 @@ func (m Model) renderContext(r row, selected bool, w int) string {
 	if m.companionAgentContextPath == ctx.Path {
 		agentStr = "🤖 "
 	}
-	installStr := "   "
+	installStr := "    "
 	if ctx.SetupStatus == workspace.SetupStatusRunning {
-		installStr = "🛠 "
+		spinnerFrames := []string{"◐", "◓", "◑", "◒"}
+		installStr = "🛠" + spinnerFrames[m.spinnerFrame%len(spinnerFrames)] + " "
 	}
 	launchStr := "  "
 	if m.launchContextPath[r.repoIdx] == ctx.Path {
@@ -255,10 +258,10 @@ func (m Model) renderContext(r row, selected bool, w int) string {
 	}
 
 	isActive := m.selectedContextPath != "" && ctx.Path == m.selectedContextPath
-	return m.renderContextRow(ctx, namePadded, branchPadded, installStr, dirtyStr, agentStr, launchStr, timeStr, hasLinear, linearColW, w, selected, isActive)
+	return m.renderContextRow(ctx, r.repoIdx, namePadded, branchPadded, installStr, dirtyStr, agentStr, launchStr, timeStr, hasLinear, linearColW, w, selected, isActive)
 }
 
-func (m Model) renderContextRow(ctx workspace.Context, namePadded, branchPadded, installStr, dirtyStr, agentStr, launchStr, timeStr string, hasLinear bool, linearColW, w int, isCursor, isActive bool) string {
+func (m Model) renderContextRow(ctx workspace.Context, repoIdx int, namePadded, branchPadded, installStr, dirtyStr, agentStr, launchStr, timeStr string, hasLinear bool, linearColW, w int, isCursor, isActive bool) string {
 	base := lipgloss.NewStyle()
 	if isCursor {
 		base = base.Background(colorSelectionActive)
@@ -272,10 +275,6 @@ func (m Model) renderContextRow(ctx workspace.Context, namePadded, branchPadded,
 	statusPrefix := "  "
 	statusStyle := base.Foreground(colorDim)
 	switch {
-	case ctx.SetupStatus == workspace.SetupStatusRunning:
-		spinnerFrames := []string{"◐ ", "◓ ", "◑ ", "◒ "}
-		statusPrefix = spinnerFrames[m.spinnerFrame%len(spinnerFrames)]
-		statusStyle = base.Foreground(colorAmber)
 	case ctx.AgentStatus == agent.StatusThinking:
 		spinnerFrames := []string{"◐ ", "◓ ", "◑ ", "◒ "}
 		statusPrefix = spinnerFrames[m.spinnerFrame%len(spinnerFrames)]
@@ -325,7 +324,7 @@ func (m Model) renderContextRow(ctx workspace.Context, namePadded, branchPadded,
 
 	var linearStyled string
 	if hasLinear {
-		linearStyled = renderLinearIssue(base, *ctx.LinearIssue, linearColW)
+		linearStyled = renderLinearIssue(base, *ctx.LinearIssue, m.maxRepoIssueIdentifierWidth(repoIdx), linearColW)
 	}
 
 	var branchStyled string
@@ -373,17 +372,21 @@ func relativeTime(t time.Time) string {
 	}
 }
 
-func renderLinearIssue(base lipgloss.Style, issue linear.Issue, width int) string {
+func renderLinearIssue(base lipgloss.Style, issue linear.Issue, idWidth, width int) string {
 	if width <= 0 {
 		return ""
 	}
 
-	idPart := issue.Identifier
-	textWidth := max(0, width-len([]rune(idPart)))
-	if textWidth == 0 {
-		return linearIDStyle(base, issue).Render(truncateRunes(idPart, width))
+	if idWidth <= 0 {
+		idWidth = len([]rune(issue.Identifier))
 	}
 
+	if width <= idWidth {
+		return linearIDStyle(base, issue).Render(truncateRunes(issue.Identifier, width))
+	}
+
+	idPart := padIssueIdentifier(issue.Identifier, idWidth)
+	textWidth := max(0, width-idWidth-1)
 	titlePart := " " + issue.Title
 	titlePart = truncateRunes(titlePart, textWidth)
 	padding := strings.Repeat(" ", max(0, textWidth-len([]rune(titlePart))))
@@ -438,6 +441,43 @@ func linearStatusColor(value string, fallback lipgloss.TerminalColor) lipgloss.T
 		return fallback
 	}
 	return lipgloss.Color(value)
+}
+
+func (m Model) maxRepoIssueIdentifierWidth(repoIdx int) int {
+	if repoIdx < 0 || repoIdx >= len(m.filteredItems) {
+		return 0
+	}
+
+	width := 0
+	for _, item := range m.filteredItems[repoIdx] {
+		if item.context.LinearIssue == nil {
+			continue
+		}
+		issueWidth := len([]rune(item.context.LinearIssue.Identifier))
+		if issueWidth > width {
+			width = issueWidth
+		}
+	}
+	return width
+}
+
+func maxIssueIdentifierWidth(issues []linear.Issue) int {
+	width := 0
+	for _, issue := range issues {
+		issueWidth := len([]rune(issue.Identifier))
+		if issueWidth > width {
+			width = issueWidth
+		}
+	}
+	return width
+}
+
+func padIssueIdentifier(value string, width int) string {
+	runes := []rune(value)
+	if width <= len(runes) {
+		return value
+	}
+	return value + strings.Repeat(" ", width-len(runes))
 }
 
 func truncateRunes(value string, width int) string {
