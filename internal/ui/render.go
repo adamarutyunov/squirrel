@@ -243,14 +243,18 @@ func (m Model) renderContext(r row, selected bool, w int) string {
 	if ctx.IsDirty {
 		dirtyStr = "● "
 	}
+	agentAttached := m.companionAgentContextPath == ctx.Path
 	agentStr := "   "
-	if m.companionAgentContextPath == ctx.Path {
+	if agentAttached {
 		agentStr = "🤖 "
 	}
-	installStr := "    "
-	if ctx.SetupStatus == workspace.SetupStatusRunning {
-		spinnerFrames := []string{"◐", "◓", "◑", "◒"}
-		installStr = "🛠" + spinnerFrames[m.spinnerFrame%len(spinnerFrames)] + " "
+	installStr := "     "
+	spinnerFrames := []string{"◐", "◓", "◑", "◒"}
+	switch {
+	case m.deletingContextPaths[ctx.Path]:
+		installStr = "🗑 " + spinnerFrames[m.tickCounter%len(spinnerFrames)] + " "
+	case ctx.SetupStatus == workspace.SetupStatusRunning:
+		installStr = "🛠 " + spinnerFrames[m.tickCounter%len(spinnerFrames)] + " "
 	}
 	launchStr := "  "
 	if m.launchContextPath[r.repoIdx] == ctx.Path {
@@ -258,10 +262,10 @@ func (m Model) renderContext(r row, selected bool, w int) string {
 	}
 
 	isActive := m.selectedContextPath != "" && ctx.Path == m.selectedContextPath
-	return m.renderContextRow(ctx, r.repoIdx, namePadded, branchPadded, installStr, dirtyStr, agentStr, launchStr, timeStr, hasLinear, linearColW, w, selected, isActive)
+	return m.renderContextRow(ctx, r.repoIdx, namePadded, branchPadded, installStr, dirtyStr, agentStr, agentAttached, launchStr, timeStr, hasLinear, linearColW, w, selected, isActive)
 }
 
-func (m Model) renderContextRow(ctx workspace.Context, repoIdx int, namePadded, branchPadded, installStr, dirtyStr, agentStr, launchStr, timeStr string, hasLinear bool, linearColW, w int, isCursor, isActive bool) string {
+func (m Model) renderContextRow(ctx workspace.Context, repoIdx int, namePadded, branchPadded, installStr, dirtyStr, agentStr string, agentAttached bool, launchStr, timeStr string, hasLinear bool, linearColW, w int, isCursor, isActive bool) string {
 	base := lipgloss.NewStyle()
 	if isCursor {
 		base = base.Background(colorSelectionActive)
@@ -274,12 +278,13 @@ func (m Model) renderContextRow(ctx workspace.Context, repoIdx int, namePadded, 
 
 	statusPrefix := "  "
 	statusStyle := base.Foreground(colorDim)
+	showDoneStatus := ctx.AgentStatus == agent.StatusDone && m.companionAgentContextPath != ctx.Path
 	switch {
 	case ctx.AgentStatus == agent.StatusThinking:
 		spinnerFrames := []string{"◐ ", "◓ ", "◑ ", "◒ "}
-		statusPrefix = spinnerFrames[m.spinnerFrame%len(spinnerFrames)]
-		statusStyle = base.Foreground(colorAmber)
-	case ctx.AgentStatus == agent.StatusDone:
+		statusPrefix = spinnerFrames[m.tickCounter%len(spinnerFrames)]
+		statusStyle = base.Foreground(colorLightBlue)
+	case showDoneStatus:
 		statusPrefix = "● "
 		statusStyle = base.Foreground(colorBlue)
 	case ctx.AgentStatus == agent.StatusIdle:
@@ -307,7 +312,7 @@ func (m Model) renderContextRow(ctx workspace.Context, repoIdx int, namePadded, 
 		dirtyStyled = base.Foreground(colorDim).Render(dirtyStr)
 	}
 	var agentStyled string
-	if agentStr == "🤖 " {
+	if agentAttached {
 		agentStyled = base.Foreground(colorBlue).Render(agentStr)
 	} else {
 		agentStyled = base.Foreground(colorDim).Render(agentStr)

@@ -15,6 +15,7 @@ import (
 var (
 	colorGreen           = lipgloss.Color("#22c55e")
 	colorBlue            = lipgloss.Color("#60a5fa")
+	colorLightBlue       = lipgloss.Color("#7dd3fc")
 	colorDim             = lipgloss.Color("#71717a")
 	colorWhite           = lipgloss.Color("#f4f4f5")
 	colorSelection       = lipgloss.Color("#3f3f46")
@@ -138,7 +139,10 @@ type Model struct {
 	launchContextPath map[int]string // repoIdx → context path the panel was opened from
 
 	// Spinner animation frame counter (incremented every tick).
-	spinnerFrame int
+	tickCounter int
+
+	// Context paths currently being deleted (shown with trash icon + spinner).
+	deletingContextPaths map[string]bool
 
 	// Agent command from user config.
 	agentCommand string
@@ -190,8 +194,9 @@ func NewModel(
 		agentCommand:      agentCommand,
 		mainPaneID:        mainPaneID,
 		companionPaneID:   companionPaneID,
-		launchPaneIDs:     make(map[int]string),
-		launchContextPath: make(map[int]string),
+		launchPaneIDs:        make(map[int]string),
+		launchContextPath:    make(map[int]string),
+		deletingContextPaths: make(map[string]bool),
 		pickerRepoIdx:     -1,
 		pickerCursor:      -1,
 		filter:            filterInput,

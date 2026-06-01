@@ -41,12 +41,15 @@ func PaneCurrentCommand(target string) (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
-func WidthForPercent(windowWidth, percent, minWidth int) int {
+func WidthForPercent(windowWidth, percent, minWidth, maxWidth int) int {
 	if windowWidth <= 0 {
 		return 0
 	}
 
 	targetWidth := windowWidth * percent / 100
+	if maxWidth > 0 && targetWidth > maxWidth {
+		targetWidth = maxWidth
+	}
 	if targetWidth < minWidth {
 		targetWidth = minWidth
 	}
@@ -59,13 +62,13 @@ func WidthForPercent(windowWidth, percent, minWidth int) int {
 	return targetWidth
 }
 
-func ResizePaneWidth(target string, percent, minWidth int) error {
+func ResizePaneWidth(target string, percent, minWidth, maxWidth int) error {
 	windowWidth, err := WindowWidth(target)
 	if err != nil {
 		return err
 	}
 
-	targetWidth := WidthForPercent(windowWidth, percent, minWidth)
+	targetWidth := WidthForPercent(windowWidth, percent, minWidth, maxWidth)
 	if targetWidth == 0 {
 		return nil
 	}
@@ -143,16 +146,6 @@ func RespawnPane(target, dir, title, shellCommand string) error {
 		return SetPaneTitle(target, title)
 	}
 	return nil
-}
-
-func ApplyMainVerticalLayout(mainPaneID string, mainPercent, minMainWidth int) error {
-	if strings.TrimSpace(mainPaneID) == "" {
-		return nil
-	}
-	if err := exec.Command("tmux", "select-layout", "-t", mainPaneID, "main-vertical").Run(); err != nil {
-		return err
-	}
-	return ResizePaneWidth(mainPaneID, mainPercent, minMainWidth)
 }
 
 func absInt(value int) int {

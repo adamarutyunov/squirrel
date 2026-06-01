@@ -10,12 +10,13 @@ import (
 type PaneWidth struct {
 	Percent  int
 	MinWidth int
+	MaxWidth int
 }
 
 var (
 	CompanionPaneWidth  = PaneWidth{Percent: 35}
-	MainPaneSoloWidth   = PaneWidth{Percent: 65, MinWidth: 40}
-	MainPaneLaunchWidth = PaneWidth{Percent: 50, MinWidth: 40}
+	MainPaneSoloWidth   = PaneWidth{Percent: 45, MinWidth: 50, MaxWidth: 90}
+	MainPaneLaunchWidth = PaneWidth{Percent: 40, MinWidth: 50, MaxWidth: 90}
 	LaunchPaneWidth     = PaneWidth{Percent: 15, MinWidth: 25}
 )
 
@@ -30,7 +31,7 @@ func (p PaneWidth) Resize(target string) error {
 	if strings.TrimSpace(target) == "" {
 		return nil
 	}
-	return tmux.ResizePaneWidth(target, p.Percent, p.MinWidth)
+	return tmux.ResizePaneWidth(target, p.Percent, p.MinWidth, p.MaxWidth)
 }
 
 func ApplyLaunchLayout(mainPaneID, launchPaneID string) error {

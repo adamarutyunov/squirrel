@@ -30,6 +30,7 @@ type setupCommandResultMsg struct {
 
 type deleteContextResultMsg struct {
 	repoIdx     int
+	contextPath string
 	err         error
 	newContexts []workspace.Context
 }

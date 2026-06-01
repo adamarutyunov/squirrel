@@ -113,7 +113,7 @@ func LaunchBackground(contextPath, sessionCommand, launchCommand string) error {
 		"tmux", "new-session", "-d",
 		"-s", sessionName,
 		"-c", contextPath,
-		"exec "+launchCommand,
+		launchCommand,
 	)
 	if err := cmd.Run(); err != nil {
 		return err

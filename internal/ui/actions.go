@@ -68,22 +68,37 @@ func (m Model) selectContext() Model {
 	m.selectedContextPath = ctx.Path
 	m.appendOutput(m.renderPrompt(ctx))
 	if m.companionPaneID != "" {
-		_ = setCompanionPendingCwd(m.companionPaneID, ctx.Path)
-		if companionAgentRunning(m.companionPaneID) {
-			_ = stmux.SelectPane(m.companionPaneID)
-			return m
-		}
-		escapedPath := strings.ReplaceAll(ctx.Path, "'", "'\\''")
-		exec.Command("tmux", "send-keys", "-t", m.companionPaneID, "C-c", "").Run()
-		exec.Command("tmux", "send-keys", "-t", m.companionPaneID, fmt.Sprintf("cd '%s'", escapedPath), "Enter").Run()
-		exec.Command("tmux", "send-keys", "-t", m.companionPaneID, "C-l", "").Run()
-		m.companionAgentContextPath = ""
-		_ = stmux.SelectPane(m.companionPaneID)
+		m.openCompanionShell(ctx.Path, ctx.Name, true)
 	}
 	return m
 }
 
+func (m *Model) openCompanionShell(contextPath, contextName string, focus bool) {
+	if m.companionPaneID == "" {
+		return
+	}
+	_ = setCompanionPendingCwd(m.companionPaneID, contextPath)
+	title := formatPaneTitle("Terminal", contextName)
+	command := companionShellCommand("", contextPath, m.companionPaneID)
+	if err := stmux.RespawnPane(m.companionPaneID, contextPath, title, command); err != nil {
+		m.appendOutput(styleDanger.Render("✗ Terminal: " + err.Error()))
+		return
+	}
+	m.companionAgentContextPath = ""
+	if focus {
+		_ = stmux.SelectPane(m.companionPaneID)
+	}
+}
+
 func (m *Model) cleanupContext(repoIdx int, contextPath string) {
+	if m.selectedContextPath == contextPath {
+		m.selectedContextPath = ""
+	}
+	if m.companionAgentContextPath == contextPath {
+		targetPath := m.activeContextPath()
+		contextName := filepath.Base(targetPath)
+		m.openCompanionShell(targetPath, contextName, false)
+	}
 	if m.launchContextPath[repoIdx] == contextPath {
 		if paneID, ok := m.launchPaneIDs[repoIdx]; ok {
 			_ = stmux.KillPane(paneID)

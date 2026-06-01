@@ -24,12 +24,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case tickMsg:
-		m.spinnerFrame++
+		m.tickCounter++
 		m.pruneClosedLaunchPanes()
 		cmds := []tea.Cmd{tickCmd()}
-		if m.spinnerFrame%4 == 0 {
+		if m.tickCounter%4 == 0 {
 			for i, path := range m.repoPaths {
 				cmds = append(cmds, refreshRepoCmd(i, path, m.repoLinearIssues[i]))
+			}
+		}
+		if m.tickCounter%240 == 0 {
+			for repoIdx, apiKey := range m.repoLinearAPIKeys {
+				if strings.TrimSpace(apiKey) == "" {
+					continue
+				}
+				cmds = append(cmds, fetchRepoLinearIssuesCmd(repoIdx, m.repoPaths[repoIdx], apiKey))
 			}
 		}
 		return m, tea.Batch(cmds...)
@@ -141,6 +149,9 @@ func (m Model) handleSetupCommandResult(msg setupCommandResultMsg) (tea.Model, t
 }
 
 func (m Model) handleDeleteContextResult(msg deleteContextResultMsg) (tea.Model, tea.Cmd) {
+	if msg.contextPath != "" {
+		delete(m.deletingContextPaths, msg.contextPath)
+	}
 	if msg.err != nil {
 		m.appendOutput(styleDanger.Render("✗ Delete failed: " + msg.err.Error()))
 	} else {
@@ -412,6 +423,7 @@ func (m Model) handleDeleteKey() (tea.Model, tea.Cmd) {
 	}
 
 	m.cleanupContext(r.repoIdx, item.context.Path)
+	m.deletingContextPaths[item.context.Path] = true
 	m.appendOutput(styleDim.Render("Deleting '" + item.context.Name + "'..."))
 	return m, deleteContextCmd(r.repoIdx, m.repoPaths[r.repoIdx], item.context, false, m.repoLinearIssues[r.repoIdx])
 }

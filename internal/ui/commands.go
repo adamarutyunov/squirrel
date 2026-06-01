@@ -89,7 +89,7 @@ func deleteContextCmd(repoIdx int, repoPath string, ctx workspace.Context, force
 	return func() tea.Msg {
 		err := workspace.DeleteContext(ctx, force)
 		newContexts, _ := workspace.ListContexts(repoPath, linearIssues)
-		return deleteContextResultMsg{repoIdx: repoIdx, err: err, newContexts: newContexts}
+		return deleteContextResultMsg{repoIdx: repoIdx, contextPath: ctx.Path, err: err, newContexts: newContexts}
 	}
 }
 

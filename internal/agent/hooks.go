@@ -10,10 +10,9 @@ import (
 )
 
 type HookInput struct {
-	HookEventName    string `json:"hook_event_name"`
-	SessionID        string `json:"session_id"`
-	Cwd              string `json:"cwd"`
-	NotificationType string `json:"notification_type"`
+	HookEventName string `json:"hook_event_name"`
+	SessionID     string `json:"session_id"`
+	Cwd           string `json:"cwd"`
 }
 
 func HandleHook(reader io.Reader) error {
@@ -35,14 +34,9 @@ func HandleHook(reader io.Reader) error {
 		return WriteStatus(hookInput.Cwd, StatusIdle)
 	case "UserPromptSubmit":
 		return WriteStatus(hookInput.Cwd, StatusThinking)
-	case "Stop", "StopFailure":
-		return WriteStatus(hookInput.Cwd, StatusDone)
+	case "Stop", "StopFailure", "SessionEnd":
+		return WriteStatus(hookInput.Cwd, StatusIdle)
 	case "Notification":
-		if hookInput.NotificationType == "idle_prompt" {
-			return WriteStatus(hookInput.Cwd, StatusIdle)
-		}
-		return nil
-	case "SessionEnd":
 		return WriteStatus(hookInput.Cwd, StatusDone)
 	default:
 		return nil
